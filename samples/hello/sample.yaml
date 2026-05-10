@@ -1,0 +1,14 @@
+sample:
+  name: fsw-core hello-world
+  description: >-
+    Hello-world Zephyr app proving the fsw-core cross-compile toolchain
+    end-to-end on the platform's pinned target (STM32H753ZI / Cortex-M7).
+tests:
+  sample.fsw-core.hello:
+    platform_allow: nucleo_h753zi
+    tags: introduction
+    harness: console
+    harness_config:
+      type: one_line
+      regex:
+        - "Hello, fsw-core / nucleo_h753zi"

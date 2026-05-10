@@ -1,0 +1,46 @@
+# West manifest for migris-labs/fsw-core (T2 manifest-repo topology).
+#
+# Workspace bootstrap (from an empty parent directory):
+#   mkdir migris-fsw-ws && cd migris-fsw-ws
+#   git clone https://github.com/migris-labs/fsw-core.git
+#   west init -l fsw-core
+#   west update
+#   west zephyr-export
+#
+# After `west update`, ../zephyr and ../modules sit as siblings of
+# fsw-core; .west/ lives in the workspace parent.
+#
+# Build the hello-world sample:
+#   west build -b nucleo_h753zi fsw-core/samples/hello --pristine=always
+manifest:
+  version: "1.0"
+
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  defaults:
+    remote: zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      repo-path: zephyr
+      # Zephyr LTS. fsw-core is a framework consumed by mission FSW
+      # repos for years; bumping to v4 LTS will be its own deliberate
+      # slice once v4 LTS lands. Verify latest 3.7.x patch tag at
+      # implementation time.
+      revision: v3.7.1
+      import:
+        # Trim the workspace clone (~3 GB → ~900 MB) by importing only
+        # the modules the Cortex-M7 / STM32H7 / printk-on-UART path
+        # actually exercises. xtensa / riscv / network-stack-heavy
+        # modules stay out.
+        name-allowlist:
+          - cmsis
+          - hal_stm32
+          - segger
+          - mbedtls
+          - picolibc
+
+  self:
+    path: fsw-core

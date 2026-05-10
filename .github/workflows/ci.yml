@@ -93,9 +93,10 @@ jobs:
 
       - name: Verify formatting
         run: |
-          find include src tests -type f \
+          find include src tests samples -type f \
             \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \
-               -o -name '*.cc' -o -name '*.cxx' -o -name '*.hxx' \) \
+               -o -name '*.cc' -o -name '*.cxx' -o -name '*.hxx' \
+               -o -name '*.c' \) \
             -print0 | xargs -0 clang-format-18 --dry-run --Werror
 
   tidy:
@@ -148,3 +149,59 @@ jobs:
 
       - name: Build with clang-tidy
         run: cmake --build build/tidy --parallel
+
+  zephyr-build:
+    name: Zephyr · nucleo_h753zi · samples/hello
+    runs-on: ubuntu-24.04
+    env:
+      ZEPHYR_SDK_VERSION: "0.16.8"
+    steps:
+      - name: Checkout fsw-core into workspace subdirectory
+        # T2 manifest-repo topology: fsw-core must live as a child of
+        # the workspace root, with zephyr/ and modules/ cloned as
+        # siblings by `west update`. Checking out into ./fsw-core and
+        # running west from one level up matches developer-machine
+        # layout exactly.
+        uses: actions/checkout@v4
+        with:
+          path: fsw-core
+
+      - name: Install ARM GCC (13.2.Rel1)
+        # carlosperate action pulls the official ARM tarball (~150 MB)
+        # instead of the apt package (~574 MB; hangs on Azure mirrors).
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: "13.2.Rel1"
+
+      - name: Set up Zephyr workspace + SDK
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: fsw-core
+          manifest-file-name: west.yml
+          toolchains: arm-zephyr-eabi
+          sdk-version: ${{ env.ZEPHYR_SDK_VERSION }}
+
+      - name: west build (nucleo_h753zi)
+        working-directory: ${{ github.workspace }}
+        run: |
+          west build \
+            --board nucleo_h753zi \
+            --pristine=always \
+            fsw-core/samples/hello \
+            --build-dir build/zephyr-hello
+
+      - name: Verify ELF
+        working-directory: ${{ github.workspace }}
+        run: |
+          arm-none-eabi-readelf -h build/zephyr-hello/zephyr/zephyr.elf | head -15
+          arm-none-eabi-size       build/zephyr-hello/zephyr/zephyr.elf
+
+      - name: Upload zephyr.elf + zephyr.bin + zephyr.map
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsw-core-hello-nucleo_h753zi
+          path: |
+            build/zephyr-hello/zephyr/zephyr.elf
+            build/zephyr-hello/zephyr/zephyr.bin
+            build/zephyr-hello/zephyr/zephyr.map
+          retention-days: 14
