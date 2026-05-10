@@ -11,9 +11,9 @@ any specific mission. Mission-specific application software (e.g.
 [`cry4-fsw`](../cry4-fsw)) consumes `migris::fsw-core` as a versioned
 dependency.
 
-## Status — slice fsw-2 (Zephyr workspace + hello-world)
+## Status — slice fsw-3 (Renode UART smoke test)
 
-The repository now has two coherent faces:
+The repository now has three coherent faces:
 
 - **Host-side** (slice fsw-1): modern CMake (≥ 3.25) build, Conan 2
   recipe, GoogleTest unit tests, ASan / UBSan / TSan / clang-tidy
@@ -25,9 +25,13 @@ The repository now has two coherent faces:
   pinned to v3.7 LTS, `samples/hello` application for the platform's
   pinned target (STM32H753ZI / ARM Cortex-M7 on `nucleo_h753zi`),
   cross-compiled with ARM GCC 13.2.Rel1 + Zephyr SDK 0.16.8 under a
-  new `zephyr-build` CI job. A Renode-driven UART smoke test that
-  actually boots the ELF and asserts on console output is the next
-  slice (fsw-3).
+  new `zephyr-build` CI job.
+- **Closed-loop on the emulated target** (slice fsw-3): pytest-driven
+  Renode 1.16.1 UART smoke test (`tests/renode/`) that boots the
+  artefact ELF on the bundled `nucleo_h753zi` platform, attaches a
+  TCP socket terminal to USART3, and asserts the hello-world contract
+  strings appear within a bounded timeout. New `renode-smoke-hello`
+  CI job depends on `zephyr-build` and consumes its ELF artefact.
 
 ## Pinned target (workspace-level)
 
@@ -116,23 +120,39 @@ ls build/zephyr/zephyr.elf
 arm-none-eabi-size build/zephyr/zephyr.elf
 ```
 
-### Run on Renode (manual; automated in slice fsw-3)
+### Renode UART smoke test (slice fsw-3)
+
+The `renode-smoke-hello` CI job boots the artefact ELF in Renode and
+asserts that the hello-world contract strings appear on USART3. The
+same suite runs locally after a `west build`:
+
+```shell
+pytest tests/renode -v
+# macOS: driver auto-discovers ~/Applications/Renode.app
+# Linux: put `renode` on PATH or set RENODE_BIN
+# Override ELF location: FSW_CORE_HELLO_ELF=/abs/path/to/zephyr.elf
+```
+
+For manual interactive debugging (attach the GUI analyzer, etc.):
 
 ```text
 $ renode
-(monitor) mach create "h7"
-(monitor) machine LoadPlatformDescription @platforms/boards/nucleo_h753zi.repl
-(monitor) sysbus LoadELF @build/zephyr/zephyr.elf
-(monitor) showAnalyzer sysbus.usart3
+(monitor) $elf = @/abs/path/to/zephyr.elf
+(monitor) $uart_port = 4444
+(monitor) i @tests/renode/scripts/hello_nucleo_h753zi.resc
 (monitor) start
 ```
 
-Expected on the UART analyzer:
+Expected on USART3 (read with `nc 127.0.0.1 4444` or
+`showAnalyzer sysbus.usart3`):
 
 ```
 Hello, fsw-core / nucleo_h753zi
 boot ok; idling
 ```
+
+See [`tests/renode/README.md`](tests/renode/README.md) for the
+fixture internals and troubleshooting.
 
 ## Layout
 
@@ -145,7 +165,9 @@ fsw-core/
 ├── cmake/              # Reusable CMake helpers (warnings, sanitizers, clang-tidy)
 ├── include/migris/fsw/ # Public headers (consumed as <migris/fsw/…>)
 ├── src/                # Host-side implementation
-├── tests/              # GoogleTest unit tests (host)
+├── tests/              # Tests (GoogleTest host + pytest Renode smoke)
+│   ├── (host gtest sources)
+│   └── renode/         # fsw-3 Renode-driven UART smoke (Python)
 └── samples/            # Zephyr applications
     └── hello/          # fsw-2 hello-world for nucleo_h753zi
 ```

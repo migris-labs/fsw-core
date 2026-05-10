@@ -205,3 +205,52 @@ jobs:
             build/zephyr-hello/zephyr/zephyr.bin
             build/zephyr-hello/zephyr/zephyr.map
           retention-days: 14
+
+  renode-smoke-hello:
+    name: Renode smoke · hello on nucleo_h753zi
+    runs-on: ubuntu-24.04
+    needs: zephyr-build
+    env:
+      RENODE_VERSION: "1.16.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download hello ELF artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: fsw-core-hello-nucleo_h753zi
+          path: artifacts/hello
+
+      - name: Verify artefact layout
+        # actions/upload-artifact@v4 preserves the directory structure
+        # of the uploaded paths, so the ELF lands at the deep path
+        # below. Fail loud here if upstream layout changes.
+        run: |
+          ls -la artifacts/hello/build/zephyr-hello/zephyr/
+          test -f artifacts/hello/build/zephyr-hello/zephyr/zephyr.elf
+
+      - name: Install Renode ${{ env.RENODE_VERSION }}
+        # Self-contained portable bundle (bundles .NET 8) — the .deb
+        # 404s on Azure-hosted Ubuntu mirrors (same gotcha as
+        # hw-catalog's renode-e2e job).
+        run: |
+          curl -fsSL -o /tmp/renode.tar.gz \
+            "https://github.com/renode/renode/releases/download/v${RENODE_VERSION}/renode-${RENODE_VERSION}.linux-portable-dotnet.tar.gz"
+          sudo mkdir -p /opt/renode
+          sudo tar -xzf /tmp/renode.tar.gz -C /opt/renode --strip-components=1
+          sudo ln -sf /opt/renode/renode /usr/local/bin/renode
+          renode --version
+
+      - name: Install pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+
+      - name: Run Renode UART smoke
+        env:
+          FSW_CORE_HELLO_ELF: ${{ github.workspace }}/artifacts/hello/build/zephyr-hello/zephyr/zephyr.elf
+        run: pytest tests/renode -v

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Migris Labs
+#
+# fsw-3 Renode UART smoke. Loads the fsw-2 hello-world ELF onto the
+# Renode-bundled nucleo_h753zi platform and exposes USART3 as a TCP
+# server socket so external test code (or `nc`) can read the console.
+#
+# Caller contract:
+#   $elf       — absolute path to zephyr.elf (set via `$elf = @/abs/path`)
+#   $uart_port — TCP port for the USART3 server-socket terminal
+#
+# Caller then issues `start` *after* attaching to $uart_port, so the
+# boot bytes (`Hello, fsw-core / nucleo_h753zi` etc.) are not dropped.
+
+mach create "fsw-hello"
+machine LoadPlatformDescription @platforms/boards/nucleo_h753zi.repl
+sysbus LoadELF $elf
+# Third arg `false` suppresses Renode's telnet IAC handshake on
+# accept; we want raw UART bytes only.
+emulation CreateServerSocketTerminal $uart_port "hello-uart" false
+connector Connect sysbus.usart3 hello-uart
