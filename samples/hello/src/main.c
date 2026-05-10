@@ -14,8 +14,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 
-int main(void)
-{
+int main(void) {
     printk("Hello, fsw-core / nucleo_h753zi\n");
     printk("boot ok; idling\n");
 
