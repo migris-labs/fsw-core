@@ -41,8 +41,10 @@ def _find_hello_elf() -> Path | None:
     Resolution order:
       1. ``FSW_CORE_HELLO_ELF`` env var (absolute path). If set, the
          path must exist — raises ``FileNotFoundError`` otherwise.
-      2. CI download-artifact layout (path-preserving v4):
-         ``<repo>/artifacts/hello/build/zephyr-hello/zephyr/zephyr.elf``.
+      2. CI download-artifact layout (v4 strips the shared prefix
+         from uploaded paths when all files share one, so the ELF
+         lands flat at the artefact root):
+         ``<repo>/artifacts/hello/zephyr.elf``.
       3. Local west build under the workspace root (parent of the
          fsw-core dir): ``<ws>/build/zephyr-hello/zephyr/zephyr.elf``.
       4. Same with the default west build dir name:
@@ -58,7 +60,7 @@ def _find_hello_elf() -> Path | None:
         return p
 
     candidates = [
-        REPO_ROOT / "artifacts/hello/build/zephyr-hello/zephyr/zephyr.elf",
+        REPO_ROOT / "artifacts/hello/zephyr.elf",
         REPO_ROOT.parent / "build/zephyr-hello/zephyr/zephyr.elf",
         REPO_ROOT.parent / "build/zephyr/zephyr.elf",
     ]

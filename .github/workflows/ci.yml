@@ -226,12 +226,13 @@ jobs:
           path: artifacts/hello
 
       - name: Verify artefact layout
-        # actions/upload-artifact@v4 preserves the directory structure
-        # of the uploaded paths, so the ELF lands at the deep path
-        # below. Fail loud here if upstream layout changes.
+        # actions/upload-artifact@v4 strips the common path prefix
+        # when all uploaded paths share one — so the three files land
+        # flat at the root of the artefact. Fail loud here if upstream
+        # layout changes.
         run: |
-          ls -la artifacts/hello/build/zephyr-hello/zephyr/
-          test -f artifacts/hello/build/zephyr-hello/zephyr/zephyr.elf
+          ls -la artifacts/hello/
+          test -f artifacts/hello/zephyr.elf
 
       - name: Install Renode ${{ env.RENODE_VERSION }}
         # Self-contained portable bundle (bundles .NET 8) — the .deb
@@ -252,5 +253,5 @@ jobs:
 
       - name: Run Renode UART smoke
         env:
-          FSW_CORE_HELLO_ELF: ${{ github.workspace }}/artifacts/hello/build/zephyr-hello/zephyr/zephyr.elf
+          FSW_CORE_HELLO_ELF: ${{ github.workspace }}/artifacts/hello/zephyr.elf
         run: pytest tests/renode -v
