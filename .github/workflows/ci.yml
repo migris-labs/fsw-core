@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONAN_VERSION: "2.6.0"
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }} · ${{ matrix.build_type }}${{ matrix.sanitizers == 'ON' && ' + ASan/UBSan' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+        build_type: [Debug, Release]
+        sanitizers: ["OFF"]
+        include:
+          - os: ubuntu-24.04
+            build_type: Debug
+            sanitizers: "ON"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Conan
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "conan==${CONAN_VERSION}"
+
+      - name: Cache Conan
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-${{ matrix.os }}-${{ matrix.build_type }}-${{ matrix.sanitizers }}-${{ hashFiles('conanfile.py') }}
+          restore-keys: |
+            conan-${{ matrix.os }}-${{ matrix.build_type }}-${{ matrix.sanitizers }}-
+            conan-${{ matrix.os }}-${{ matrix.build_type }}-
+
+      - name: Configure Conan profile
+        run: conan profile detect --force
+
+      - name: Conan install
+        run: |
+          conan install . \
+            -s build_type=${{ matrix.build_type }} \
+            --build=missing \
+            --output-folder=build
+
+      - name: CMake configure
+        run: |
+          EXTRA=""
+          if [ "${{ matrix.sanitizers }}" = "ON" ]; then
+            EXTRA="-DMIGRIS_FSW_ENABLE_ASAN=ON -DMIGRIS_FSW_ENABLE_UBSAN=ON"
+          fi
+          cmake -S . -B build/${{ matrix.build_type }} \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/build/build/${{ matrix.build_type }}/generators/conan_toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DMIGRIS_FSW_BUILD_TESTS=ON \
+            $EXTRA
+
+      - name: Build
+        run: cmake --build build/${{ matrix.build_type }} --parallel
+
+      - name: Test
+        run: ctest --test-dir build/${{ matrix.build_type }} --output-on-failure --no-tests=error
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Verify formatting
+        run: |
+          find include src tests -type f \
+            \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \
+               -o -name '*.cc' -o -name '*.cxx' -o -name '*.hxx' \) \
+            -print0 | xargs -0 clang-format-18 --dry-run --Werror
+
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy-18
+          python -m pip install --upgrade pip
+          python -m pip install "conan==${CONAN_VERSION}"
+
+      - name: Cache Conan
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-tidy-${{ hashFiles('conanfile.py') }}
+          restore-keys: conan-tidy-
+
+      - name: Configure Conan profile
+        run: conan profile detect --force
+
+      - name: Conan install
+        run: |
+          conan install . \
+            -s build_type=Debug \
+            --build=missing \
+            --output-folder=build
+
+      - name: CMake configure (tidy)
+        env:
+          CC:  clang-18
+          CXX: clang++-18
+        run: |
+          cmake -S . -B build/tidy \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/build/build/Debug/generators/conan_toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DMIGRIS_FSW_BUILD_TESTS=ON \
+            -DMIGRIS_FSW_ENABLE_CLANG_TIDY=ON
+
+      - name: Build with clang-tidy
+        run: cmake --build build/tidy --parallel

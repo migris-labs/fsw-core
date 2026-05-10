@@ -1,0 +1,29 @@
+{
+  "_help_": [
+    "cmake-format / cmake-lint configuration. JSON because the precommit",
+    "env that runs cmake-format ships without PyYAML, so YAML configs are",
+    "skipped silently and our settings would not apply. Layout is owned",
+    "by cmake-format (auto-applied via the pre-commit hook); cmake-lint's",
+    "Convention-level checks listed under disabled_codes below conflict",
+    "with that layout or with our chosen conventions and are silenced",
+    "deliberately rather than papering over each occurrence with an",
+    "inline disable comment.",
+    "  C0103 - variable names with leading underscore. We use `_foo` to",
+    "          mark function-local sets that should not leak; the",
+    "          cmake-lint default regex disallows the leading underscore.",
+    "  C0111 - missing docstrings on every function/macro. Helpers are",
+    "          short, self-documenting via filename + leading file comment.",
+    "  C0301 - line length > 80. Repo-wide column limit is 100",
+    "          (.clang-format, .editorconfig); cmake-lint default 80 is",
+    "          inconsistent with that.",
+    "  C0307 - indentation level. cmake-format owns layout; if",
+    "          cmake-format and cmake-lint disagree, cmake-format wins."
+  ],
+  "format": {
+    "line_width": 100,
+    "tab_size": 2
+  },
+  "lint": {
+    "disabled_codes": ["C0103", "C0111", "C0301", "C0307"]
+  }
+}
