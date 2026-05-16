@@ -258,23 +258,14 @@ TEST(Pus5, RejectsAuxOverMax) {
     EXPECT_EQ(seq, 0U);
 }
 
-TEST(Pus5, RejectsBadSeverity) {
-    migris_pus5_ctx_t ctx{};
-    std::uint16_t seq = 0U;
-    std::array<std::uint8_t, MIGRIS_PUS5_TM_MAX_PACKET_SIZE> tm{};
-    EXPECT_EQ(migris_pus5_build_event_report(&ctx,
-                                             test_apid,
-                                             &seq,
-                                             0U,
-                                             static_cast<migris_pus5_severity_t>(9),
-                                             0x0001U,
-                                             nullptr,
-                                             0U,
-                                             0U,
-                                             tm.data(),
-                                             tm.size()),
-              MIGRIS_PUS5_ERR_BAD_ARG);
-}
+// Note: the encoder's out-of-range-severity guard is exercised on the
+// freestanding C flight side, not here. Constructing an out-of-range
+// value of an unscoped enum without a fixed underlying type is
+// *unspecified* in C++ (and flagged by both GCC -Wconversion and
+// clang-tidy EnumCastOutOfRange), so a "bad severity" case cannot be
+// expressed portably from this C++ harness. This mirrors pus1_test,
+// which likewise trusts its enums at the C++ boundary; the guard
+// stays as defensive depth for a corrupted-input caller bug in C.
 
 TEST(Pus5, RejectsNullAuxWithNonzeroLen) {
     migris_pus5_ctx_t ctx{};

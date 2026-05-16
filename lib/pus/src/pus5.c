@@ -31,8 +31,12 @@ int migris_pus5_build_event_report(migris_pus5_ctx_t* ctx,
                                    uint16_t destination_id,
                                    uint8_t* out,
                                    size_t out_cap) {
-    /* Unsigned compare catches both an out-of-range severity and a
-     * negative one cast in by a caller (a huge unsigned value). */
+    /* Defensive depth for the freestanding C flight side: an unsigned
+     * compare catches a corrupted / out-of-range severity (incl. a
+     * negative one, which becomes a huge unsigned value) before it
+     * indexes ctx->msg_counter[]. Not unit-tested from the C++ harness
+     * — constructing an out-of-range unscoped enum there is
+     * unspecified behaviour (see tests/pus5_test.cpp). */
     if ((unsigned int)severity > (unsigned int)MIGRIS_PUS5_SEV_HIGH) {
         return MIGRIS_PUS5_ERR_BAD_ARG;
     }

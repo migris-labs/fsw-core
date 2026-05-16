@@ -17,6 +17,7 @@ target_sources(
           ${MIGRIS_FSW_PUS_DIR}/src/pus_tc.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus_tm.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus1.c
+          ${MIGRIS_FSW_PUS_DIR}/src/pus5.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus17.c
           ${MIGRIS_FSW_PUS_DIR}/src/tc_router.c)
 
