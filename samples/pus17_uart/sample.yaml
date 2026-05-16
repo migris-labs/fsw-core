@@ -1,0 +1,16 @@
+sample:
+  name: fsw-core PUS-17 UART round-trip
+  description: >-
+    Zephyr application that listens on USART3 for a CCSDS Space
+    Packet, validates it as a PUS-17[1] connection-test TC, and
+    replies with a PUS-17[2] TM on the same UART. Used by the
+    Renode round-trip smoke test in tests/renode/.
+tests:
+  sample.fsw-core.pus17_uart:
+    platform_allow: nucleo_h753zi
+    tags: pus uart
+    # The sample only emits when a valid PUS-17[1] arrives — there
+    # is no spontaneous output to harness on. Twister discovery
+    # lives here so the build is exercised; behavioural coverage is
+    # provided by tests/renode/test_pus17_uart.py.
+    harness: none

@@ -151,8 +151,20 @@ jobs:
         run: cmake --build build/tidy --parallel
 
   zephyr-build:
-    name: Zephyr · nucleo_h753zi · samples/hello
+    name: Zephyr · nucleo_h753zi · ${{ matrix.sample.name }}
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sample:
+          - name: samples/hello
+            path: samples/hello
+            build_dir: zephyr-hello
+            artefact: fsw-core-hello-nucleo_h753zi
+          - name: samples/pus17_uart
+            path: samples/pus17_uart
+            build_dir: zephyr-pus17
+            artefact: fsw-core-pus17-nucleo_h753zi
     env:
       ZEPHYR_SDK_VERSION: "0.16.8"
     steps:
@@ -181,35 +193,49 @@ jobs:
           toolchains: arm-zephyr-eabi
           sdk-version: ${{ env.ZEPHYR_SDK_VERSION }}
 
-      - name: west build (nucleo_h753zi)
+      - name: west build (nucleo_h753zi · ${{ matrix.sample.name }})
         working-directory: ${{ github.workspace }}
         run: |
           west build \
             --board nucleo_h753zi \
             --pristine=always \
-            fsw-core/samples/hello \
-            --build-dir build/zephyr-hello
+            fsw-core/${{ matrix.sample.path }} \
+            --build-dir build/${{ matrix.sample.build_dir }}
 
       - name: Verify ELF
         working-directory: ${{ github.workspace }}
         run: |
-          arm-none-eabi-readelf -h build/zephyr-hello/zephyr/zephyr.elf | head -15
-          arm-none-eabi-size       build/zephyr-hello/zephyr/zephyr.elf
+          arm-none-eabi-readelf -h build/${{ matrix.sample.build_dir }}/zephyr/zephyr.elf | head -15
+          arm-none-eabi-size       build/${{ matrix.sample.build_dir }}/zephyr/zephyr.elf
 
       - name: Upload zephyr.elf + zephyr.bin + zephyr.map
         uses: actions/upload-artifact@v4
         with:
-          name: fsw-core-hello-nucleo_h753zi
+          name: ${{ matrix.sample.artefact }}
           path: |
-            build/zephyr-hello/zephyr/zephyr.elf
-            build/zephyr-hello/zephyr/zephyr.bin
-            build/zephyr-hello/zephyr/zephyr.map
+            build/${{ matrix.sample.build_dir }}/zephyr/zephyr.elf
+            build/${{ matrix.sample.build_dir }}/zephyr/zephyr.bin
+            build/${{ matrix.sample.build_dir }}/zephyr/zephyr.map
           retention-days: 14
 
-  renode-smoke-hello:
-    name: Renode smoke · hello on nucleo_h753zi
+  renode-smoke:
+    name: Renode smoke · ${{ matrix.smoke.name }} on nucleo_h753zi
     runs-on: ubuntu-24.04
     needs: zephyr-build
+    strategy:
+      fail-fast: false
+      matrix:
+        smoke:
+          - name: hello
+            artefact: fsw-core-hello-nucleo_h753zi
+            artefact_dir: hello
+            pytest_filter: test_hello_uart.py
+            env_var: FSW_CORE_HELLO_ELF
+          - name: pus17
+            artefact: fsw-core-pus17-nucleo_h753zi
+            artefact_dir: pus17
+            pytest_filter: test_pus17_uart.py
+            env_var: FSW_CORE_PUS17_ELF
     env:
       RENODE_VERSION: "1.16.1"
     steps:
@@ -219,11 +245,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Download hello ELF artefact
+      - name: Download ELF artefact (${{ matrix.smoke.artefact }})
         uses: actions/download-artifact@v4
         with:
-          name: fsw-core-hello-nucleo_h753zi
-          path: artifacts/hello
+          name: ${{ matrix.smoke.artefact }}
+          path: artifacts/${{ matrix.smoke.artefact_dir }}
 
       - name: Verify artefact layout
         # actions/upload-artifact@v4 strips the common path prefix
@@ -231,8 +257,8 @@ jobs:
         # flat at the root of the artefact. Fail loud here if upstream
         # layout changes.
         run: |
-          ls -la artifacts/hello/
-          test -f artifacts/hello/zephyr.elf
+          ls -la artifacts/${{ matrix.smoke.artefact_dir }}/
+          test -f artifacts/${{ matrix.smoke.artefact_dir }}/zephyr.elf
 
       - name: Install Renode ${{ env.RENODE_VERSION }}
         # Self-contained portable bundle (bundles .NET 8) — the .deb
@@ -252,6 +278,8 @@ jobs:
           python -m pip install pytest
 
       - name: Run Renode UART smoke
-        env:
-          FSW_CORE_HELLO_ELF: ${{ github.workspace }}/artifacts/hello/zephyr.elf
-        run: pytest tests/renode -v
+        # GHA env: map keys must be static, so we export the
+        # per-sample env var name in-shell instead of via env:.
+        run: |
+          export ${{ matrix.smoke.env_var }}="${{ github.workspace }}/artifacts/${{ matrix.smoke.artefact_dir }}/zephyr.elf"
+          pytest tests/renode/${{ matrix.smoke.pytest_filter }} -v

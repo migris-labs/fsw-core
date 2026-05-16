@@ -11,27 +11,35 @@ any specific mission. Mission-specific application software (e.g.
 [`cry4-fsw`](../cry4-fsw)) consumes `migris::fsw-core` as a versioned
 dependency.
 
-## Status — slice fsw-3 (Renode UART smoke test)
+## Status — slice fsw-4 (PUS-17 connection test over UART)
 
-The repository now has three coherent faces:
+The repository now has four coherent faces:
 
 - **Host-side** (slice fsw-1): modern CMake (≥ 3.25) build, Conan 2
   recipe, GoogleTest unit tests, ASan / UBSan / TSan / clang-tidy
   presets, GitHub Actions CI (Ubuntu + macOS, Debug + Release,
   ASan/UBSan, format, clang-tidy), pre-commit hooks (Conventional
-  Commits enforced). The host library `migris::fsw-core` exposes a
-  version surface today.
+  Commits enforced). The host library `migris::fsw-core` carries the
+  version surface plus the freestanding PUS codec described below.
 - **Embedded-side** (slice fsw-2): Zephyr west T2 manifest repository
   pinned to v3.7 LTS, `samples/hello` application for the platform's
   pinned target (STM32H753ZI / ARM Cortex-M7 on `nucleo_h753zi`),
-  cross-compiled with ARM GCC 13.2.Rel1 + Zephyr SDK 0.16.8 under a
-  new `zephyr-build` CI job.
+  cross-compiled with ARM GCC 13.2.Rel1 + Zephyr SDK 0.16.8 under the
+  `zephyr-build` CI job.
 - **Closed-loop on the emulated target** (slice fsw-3): pytest-driven
-  Renode 1.16.1 UART smoke test (`tests/renode/`) that boots the
-  artefact ELF on the bundled `nucleo_h753zi` platform, attaches a
-  TCP socket terminal to USART3, and asserts the hello-world contract
-  strings appear within a bounded timeout. New `renode-smoke-hello`
-  CI job depends on `zephyr-build` and consumes its ELF artefact.
+  Renode 1.16.1 UART smoke (`tests/renode/test_hello_uart.py`) boots
+  the hello-world ELF on the bundled `nucleo_h753zi` platform,
+  attaches a TCP socket terminal to USART3, and asserts the contract
+  strings appear within a bounded timeout.
+- **First on-board PUS service** (slice fsw-4): freestanding C codec
+  under `lib/pus/` (CCSDS Space Packet, CRC-16-CCITT-FALSE, PUS-C
+  TC/TM secondary headers, PUS-17 handler) compiled into both
+  `migris::fsw-core` (host, exercised by GoogleTest under
+  ASan/UBSan/clang-tidy) and the new `samples/pus17_uart` Zephyr
+  application (Cortex-M7). Round-trip is exercised end-to-end by
+  `tests/renode/test_pus17_uart.py`: ground sends a PUS-17[1] TC on
+  USART3, FSW replies with a PUS-17[2] TM. Wire format is pinned in
+  [`docs/wire/pus-17.md`](docs/wire/pus-17.md).
 
 ## Pinned target (workspace-level)
 
@@ -120,17 +128,26 @@ ls build/zephyr/zephyr.elf
 arm-none-eabi-size build/zephyr/zephyr.elf
 ```
 
-### Renode UART smoke test (slice fsw-3)
+### Renode UART smoke tests (slices fsw-3, fsw-4)
 
-The `renode-smoke-hello` CI job boots the artefact ELF in Renode and
-asserts that the hello-world contract strings appear on USART3. The
-same suite runs locally after a `west build`:
+CI runs two parallel `renode-smoke` jobs that boot artefact ELFs in
+Renode and exercise USART3:
+
+- **`hello`** (fsw-3) — asserts the boot-banner contract strings
+  appear on the UART within a bounded timeout.
+- **`pus17`** (fsw-4) — drives a full PUS-17 TC → TM round-trip over
+  the bidirectional UART socket and decodes the response against the
+  byte-level spec in `docs/wire/pus-17.md`.
+
+The same suite runs locally after a `west build`:
 
 ```shell
 pytest tests/renode -v
 # macOS: driver auto-discovers ~/Applications/Renode.app
 # Linux: put `renode` on PATH or set RENODE_BIN
-# Override ELF location: FSW_CORE_HELLO_ELF=/abs/path/to/zephyr.elf
+# Override ELF locations:
+#   FSW_CORE_HELLO_ELF=/abs/path/to/hello/zephyr.elf
+#   FSW_CORE_PUS17_ELF=/abs/path/to/pus17/zephyr.elf
 ```
 
 For manual interactive debugging (attach the GUI analyzer, etc.):
@@ -139,17 +156,20 @@ For manual interactive debugging (attach the GUI analyzer, etc.):
 $ renode
 (monitor) $elf = @/abs/path/to/zephyr.elf
 (monitor) $uart_port = 4444
-(monitor) i @tests/renode/scripts/hello_nucleo_h753zi.resc
+(monitor) i @tests/renode/scripts/hello_nucleo_h753zi.resc   # or pus17_nucleo_h753zi.resc
 (monitor) start
 ```
 
-Expected on USART3 (read with `nc 127.0.0.1 4444` or
+Expected on USART3 for `hello` (read with `nc 127.0.0.1 4444` or
 `showAnalyzer sysbus.usart3`):
 
 ```
 Hello, fsw-core / nucleo_h753zi
 boot ok; idling
 ```
+
+For `pus17`, send a PUS-17[1] TC and read the 18-byte PUS-17[2] TM
+reply — see `samples/pus17_uart/README.md`.
 
 See [`tests/renode/README.md`](tests/renode/README.md) for the
 fixture internals and troubleshooting.
@@ -161,15 +181,20 @@ fsw-core/
 ├── CMakeLists.txt
 ├── CMakePresets.json
 ├── conanfile.py
-├── west.yml            # Zephyr west manifest (T2 topology)
-├── cmake/              # Reusable CMake helpers (warnings, sanitizers, clang-tidy)
-├── include/migris/fsw/ # Public headers (consumed as <migris/fsw/…>)
-├── src/                # Host-side implementation
-├── tests/              # Tests (GoogleTest host + pytest Renode smoke)
+├── west.yml                # Zephyr west manifest (T2 topology)
+├── cmake/                  # Reusable CMake helpers (warnings, sanitizers, clang-tidy)
+├── docs/wire/              # Wire-format authoritative specs (pus-17.md, …)
+├── include/migris/fsw/     # Host-side public C++ headers (<migris/fsw/…>)
+├── lib/pus/                # Freestanding C codec (CCSDS + PUS-C + PUS-17)
+│   ├── include/migris/fsw/pus/
+│   └── src/
+├── src/                    # Host-side C++ implementation
+├── tests/                  # Tests (GoogleTest host + pytest Renode smoke)
 │   ├── (host gtest sources)
-│   └── renode/         # fsw-3 Renode-driven UART smoke (Python)
-└── samples/            # Zephyr applications
-    └── hello/          # fsw-2 hello-world for nucleo_h753zi
+│   └── renode/             # fsw-3 / fsw-4 Renode-driven UART smoke (Python)
+└── samples/                # Zephyr applications
+    ├── hello/              # fsw-2 hello-world for nucleo_h753zi
+    └── pus17_uart/         # fsw-4 PUS-17 connection test over USART3
 ```
 
 `.west/`, `zephyr/`, `modules/` are workspace siblings created by

@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Migris Labs
+#
+# fsw-4 Renode driver for the PUS-17 UART sample. Same shape as the
+# fsw-3 hello driver — loads the supplied ELF onto the
+# Renode-bundled nucleo_h753zi platform, then exposes USART3 as a
+# bidirectional TCP server socket so external test code can both
+# read and write packet bytes.
+#
+# Caller contract:
+#   $elf       — absolute path to zephyr.elf (set via `$elf = @/abs/path`)
+#   $uart_port — TCP port for the USART3 server-socket terminal
+#
+# Caller must connect to $uart_port *before* issuing `start`, so the
+# first TC bytes the test sends are not dropped while the emulator
+# is still warming up.
+
+mach create "fsw-pus17"
+machine LoadPlatformDescription @platforms/boards/nucleo_h753zi.repl
+sysbus LoadELF $elf
+
+# Third arg `false` suppresses Renode's telnet IAC handshake on
+# accept — we want raw UART bytes on the socket in both directions.
+emulation CreateServerSocketTerminal $uart_port "pus17-uart" false
+connector Connect sysbus.usart3 pus17-uart

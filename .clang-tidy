@@ -37,6 +37,11 @@ Checks: >
   -readability-magic-numbers
 
 WarningsAsErrors: '*'
+# Note: lib/ is deliberately excluded from this regex. The PUS codec under
+# lib/pus/ is freestanding C with its own .clang-tidy (C-style snake_case
+# typedefs, <stdint.h>/<stddef.h> headers). Each TU's config governs
+# whichever headers match its own HeaderFilterRegex, so the root C++
+# config doesn't have to know about C-ABI conventions.
 HeaderFilterRegex: '^(include|src|tests)/.*'
 FormatStyle: file
 

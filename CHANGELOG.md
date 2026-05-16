@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-4: PUS-17 connection test over UART.** New freestanding
+  C codec under `lib/pus/` (CCSDS Space Packet primary header
+  pack/unpack, CRC-16-CCITT-FALSE, PUS-C TC/TM secondary headers,
+  PUS-17 service handler), compiled into both `migris::fsw-core`
+  (host) and the new `samples/pus17_uart` Zephyr application
+  (Cortex-M7) so the wire-format bytes are covered by ASan / UBSan /
+  clang-tidy on every PR. New `tests/renode/test_pus17_uart.py`
+  drives a round-trip on the emulated `nucleo_h753zi`: ground sends
+  a PUS-17[1] TC on USART3, FSW replies with a PUS-17[2] TM. New
+  CI job `renode-smoke · pus17` parallels the existing
+  `renode-smoke · hello`. Wire format is authoritatively pinned in
+  [`docs/wire/pus-17.md`](docs/wire/pus-17.md).
+- **Slice fsw-3: Renode-driven UART smoke test on `nucleo_h753zi`.**
+  New `tests/renode/` pytest suite boots the fsw-2 hello-world ELF on
+  Renode 1.16.1 against the bundled `nucleo_h753zi` platform and
+  asserts the hello-world contract strings on USART3. CI gains the
+  `renode-smoke-hello` job, depending on `zephyr-build` and consuming
+  its ELF artefact via the v4 download-artifact layout.
 - **Slice fsw-2: Zephyr west workspace + `nucleo_h753zi` hello-world.**
   Repository is now a west T2 manifest repo (`west.yml`) pinned to
   Zephyr v3.7 LTS. New `samples/hello/` Zephyr application builds for

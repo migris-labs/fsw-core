@@ -34,6 +34,7 @@ class MigrisFswCoreConan(ConanFile):
         "cmake/*",
         "include/*",
         "src/*",
+        "lib/*",
         "tests/*",
         "LICENSE",
     )

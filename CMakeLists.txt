@@ -5,7 +5,7 @@ project(
   VERSION 0.1.0
   DESCRIPTION "Migris platform — flight-software framework (HAL, PUS, FDIR, mode mgr, scheduler)"
   HOMEPAGE_URL "https://github.com/migris-labs/fsw-core"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
 # Basic standards
@@ -13,6 +13,12 @@ project(
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# C99 for the freestanding lib/pus codec. Zephyr supports C99/C11 too,
+# so the same translation units compile on both toolchains.
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -49,12 +55,25 @@ include(StaticAnalysis)
 add_library(fsw-core)
 add_library(migris::fsw-core ALIAS fsw-core)
 
-target_sources(fsw-core PRIVATE src/version.cpp)
+# Host-side surface: version (C++) + freestanding PUS codec (C). The PUS sources
+# under lib/pus/ also compile against the Cortex-M7 / Zephyr toolchain — the
+# same translation units run on-board, so every wire-format byte is covered by
+# host CI (ASan/UBSan/clang-tidy) on every PR.
+target_sources(
+  fsw-core
+  PRIVATE src/version.cpp
+          lib/pus/src/ccsds.c
+          lib/pus/src/pus_tc.c
+          lib/pus/src/pus_tm.c
+          lib/pus/src/pus17.c)
 
-target_include_directories(fsw-core PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-                                           $<INSTALL_INTERFACE:include>)
+target_include_directories(
+  fsw-core
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/pus/include>
+         $<INSTALL_INTERFACE:include>)
 
-target_compile_features(fsw-core PUBLIC cxx_std_20)
+target_compile_features(fsw-core PUBLIC cxx_std_20 c_std_99)
 
 set_target_properties(
   fsw-core
@@ -103,6 +122,12 @@ install(
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING
   PATTERN "*.hpp")
+
+install(
+  DIRECTORY lib/pus/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING
+  PATTERN "*.h")
 
 install(
   EXPORT migris-fsw-core-targets

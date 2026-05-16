@@ -320,6 +320,18 @@ class UartCapture:
         with self._lock:
             return bytes(self._buf)
 
+    def send(self, payload: bytes) -> None:
+        """Write ``payload`` to the underlying Renode terminal socket.
+
+        Renode's ``CreateServerSocketTerminal`` is bidirectional: bytes
+        sent to the socket appear on the UART RX line of the connected
+        peripheral, which is exactly what the fsw-4 PUS-17 round-trip
+        test needs. The socket has its own short ``settimeout`` for the
+        reader thread; ``sendall`` honours that for writes too, which
+        is fine because small TC packets (<32 B) flush in microseconds.
+        """
+        self._sock.sendall(payload)
+
     def close(self) -> None:
         """Stop the reader thread and drop the socket. Idempotent."""
         self._stop.set()
