@@ -65,6 +65,7 @@ target_sources(
           lib/pus/src/pus_tc.c
           lib/pus/src/pus_tm.c
           lib/pus/src/pus1.c
+          lib/pus/src/pus5.c
           lib/pus/src/pus17.c
           lib/pus/src/tc_router.c)
 
