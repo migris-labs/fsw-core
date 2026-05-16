@@ -37,8 +37,8 @@ struct TcOpts {
     std::uint16_t apid = test_apid;
     bool corrupt_crc = false;
     std::uint8_t pus_version = MIGRIS_PUS_VERSION_C;
-    int data_length_override = -1;         // < 0 → correct value
-    std::vector<std::uint8_t> app_data{};  // user data after the TC sec header
+    int data_length_override = -1;       // < 0 → correct value
+    std::vector<std::uint8_t> app_data;  // user data after the TC sec header
 };
 
 // Ground-side PUS-C TC encoder. Pure: any structural problem is

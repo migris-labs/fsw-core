@@ -187,21 +187,23 @@ def test_oneshot_poll_round_trip(tc_hk_running) -> None:  # noqa: F811
         return None
 
     uart.send(tc)
-    tms, (acc, hk, comp) = _collect(uart, find_triplet, timeout=60.0)
+    _, (acc, hk, comp) = _collect(uart, find_triplet, timeout=60.0)
 
-    # The poll report carries the full 47-byte packet and echoes the
-    # triggering source ID — that is what set it apart from the
-    # spontaneous reports (destination_id == 0) in the same stream.
-    assert len(split_packets(uart.buffer())) >= 3
+    # The poll report carries the full 47-byte packet, echoes the
+    # triggering source ID (asserted in find_triplet — that is what
+    # distinguishes it from the destination_id==0 spontaneous reports),
+    # and the shared per-APID sequence is strictly monotonic across the
+    # one-dispatch triplet (no periodic report can splice into it). The
+    # spontaneous-report path itself is covered by the periodic tests
+    # above; the FSW answers this poll within emulated milliseconds, so
+    # the triplet generally lands before the first ~period-delayed
+    # spontaneous report — asserting one is already present here would
+    # be racy and is intentionally not done.
     assert hk.pus3_sid == PUS3_SID_FRAMEWORK_DIAG
     assert len(hk.source_data) == PUS3_HK_SOURCE_DATA_SIZE
     assert acc.primary.seq_count + 1 == hk.primary.seq_count
     assert hk.primary.seq_count + 1 == comp.primary.seq_count
     assert acc.crc_ok and hk.crc_ok and comp.crc_ok
-
-    # Spontaneous reports in the same stream are addressed to nobody.
-    spontaneous = [t for t in tms if _is_hk(t) and t.secondary.destination_id == 0]
-    assert spontaneous, "expected at least one periodic HK report too"
 
 
 def test_rx_overflow_counter_zero_under_nominal_traffic(tc_hk_running) -> None:  # noqa: F811

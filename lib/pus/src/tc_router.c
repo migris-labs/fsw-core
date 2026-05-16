@@ -170,6 +170,48 @@ static int router_pus3_oneshot(migris_tc_router_ctx_t* ctx,
     return 0;
 }
 
+/* Route an accepted TC to its service handler by service type.
+ * migris_tc_accept already rejected every type other than PUS-17 and
+ * PUS-3, so the default arm is unreachable — kept only to keep the
+ * switch total (-Wswitch / clang-tidy). Returns the bytes written into
+ * `out`; on a handler error, sets `*exec_fc` to the PUS-1
+ * completion-failure cause and returns 0. */
+static int router_route(migris_tc_router_ctx_t* ctx,
+                        const migris_tc_accept_result_t* v,
+                        uint32_t now_seconds,
+                        const uint8_t* tc,
+                        size_t tc_len,
+                        uint8_t* out,
+                        size_t out_cap,
+                        migris_pus1_failure_code_t* exec_fc) {
+    switch (v->service_type) {
+    case MIGRIS_PUS_SERVICE_TEST: {
+        const int rc = migris_pus17_execute(&ctx->pus17,
+                                            ctx->apid,
+                                            &ctx->tm_seq_count,
+                                            now_seconds,
+                                            v->service_subtype,
+                                            v->source_id,
+                                            out,
+                                            out_cap);
+        if (rc > 0) {
+            return rc;
+        }
+        if (rc == MIGRIS_PUS17_ERR_NOT_PUS17_TC) {
+            *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
+        } else {
+            *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+        }
+        return 0;
+    }
+    case MIGRIS_PUS_SERVICE_HOUSEKEEPING:
+        return router_pus3_oneshot(ctx, v, now_seconds, tc, tc_len, out, out_cap, exec_fc);
+    default:
+        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+        return 0;
+    }
+}
+
 int migris_tc_router_dispatch(migris_tc_router_ctx_t* ctx,
                               uint32_t now_seconds,
                               const uint8_t* tc,
@@ -266,50 +308,15 @@ int migris_tc_router_dispatch(migris_tc_router_ctx_t* ctx,
         }
     }
 
-    /* Route to the service handler by service type. migris_tc_accept
-     * already rejected every type other than PUS-17 and PUS-3, so the
-     * default arm is unreachable — it is kept only to make the switch
-     * total. Subtype validity is an execution-stage concern: an
-     * accepted TC with an unsupported subtype routes here and yields a
-     * PUS-1[8] completion failure (UNKNOWN_SUBTYPE), never an
-     * acceptance failure. */
+    /* Route to the service handler. Subtype validity is an
+     * execution-stage concern: an accepted TC with an unsupported
+     * subtype yields a PUS-1[8] completion failure (UNKNOWN_SUBTYPE),
+     * never an acceptance failure. */
     migris_pus1_failure_code_t exec_fc = MIGRIS_PUS1_FC_NONE;
-    switch (v.service_type) {
-    case MIGRIS_PUS_SERVICE_TEST: {
-        const int rc = migris_pus17_execute(&ctx->pus17,
-                                            ctx->apid,
-                                            &ctx->tm_seq_count,
-                                            now_seconds,
-                                            v.service_subtype,
-                                            v.source_id,
-                                            &out[off],
-                                            out_cap - off);
-        if (rc > 0) {
-            off += (size_t)rc;
-        } else if (rc == MIGRIS_PUS17_ERR_NOT_PUS17_TC) {
-            exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
-        } else {
-            exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
-        }
-        break;
-    }
-    case MIGRIS_PUS_SERVICE_HOUSEKEEPING: {
-        const int rc = router_pus3_oneshot(ctx,
-                                           &v,
-                                           now_seconds,
-                                           tc,
-                                           tc_len,
-                                           &out[off],
-                                           out_cap - off,
-                                           &exec_fc);
-        if (rc > 0) {
-            off += (size_t)rc;
-        }
-        break;
-    }
-    default:
-        exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
-        break;
+    const int rc =
+        router_route(ctx, &v, now_seconds, tc, tc_len, &out[off], out_cap - off, &exec_fc);
+    if (rc > 0) {
+        off += (size_t)rc;
     }
 
     if ((v.ack_flags & MIGRIS_PUS_TC_ACK_COMPLETION) != 0U) {
