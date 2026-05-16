@@ -161,10 +161,23 @@ jobs:
             path: samples/hello
             build_dir: zephyr-hello
             artefact: fsw-core-hello-nucleo_h753zi
+            cmake_extra: ""
+          # Verification-stream ELF: PUS-3 housekeeping period pinned to
+          # "never within a test". Renode fast-forwards idle virtual
+          # time, so a fixed short period would race test_tc_uart.py's
+          # fixed-offset reads non-deterministically.
           - name: samples/tc_uart
             path: samples/tc_uart
             build_dir: zephyr-tc
             artefact: fsw-core-tc-nucleo_h753zi
+            cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=86400"
+          # Housekeeping ELF: same sample, short period so the periodic
+          # PUS-3[25] cadence is fast and deterministic (test_tc_uart_hk.py).
+          - name: samples/tc_uart (hk)
+            path: samples/tc_uart
+            build_dir: zephyr-tc-hk
+            artefact: fsw-core-tc-hk-nucleo_h753zi
+            cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=2"
     env:
       ZEPHYR_SDK_VERSION: "0.16.8"
     steps:
@@ -200,7 +213,8 @@ jobs:
             --board nucleo_h753zi \
             --pristine=always \
             fsw-core/${{ matrix.sample.path }} \
-            --build-dir build/${{ matrix.sample.build_dir }}
+            --build-dir build/${{ matrix.sample.build_dir }} \
+            ${{ matrix.sample.cmake_extra }}
 
       - name: Verify ELF
         working-directory: ${{ github.workspace }}
@@ -236,6 +250,11 @@ jobs:
             artefact_dir: tc
             pytest_filter: test_tc_uart.py
             env_var: FSW_CORE_TC_ELF
+          - name: tc-hk
+            artefact: fsw-core-tc-hk-nucleo_h753zi
+            artefact_dir: tc-hk
+            pytest_filter: test_tc_uart_hk.py
+            env_var: FSW_CORE_TC_HK_ELF
     env:
       RENODE_VERSION: "1.16.1"
     steps:

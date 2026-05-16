@@ -11,6 +11,7 @@
 
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
+#include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus17.h"
 #include "migris/fsw/pus/pus_tc.h"
 #include "migris/fsw/pus/pus_tm.h"
@@ -37,17 +38,22 @@ struct TcOpts {
     bool corrupt_crc = false;
     std::uint8_t pus_version = MIGRIS_PUS_VERSION_C;
     int data_length_override = -1;  // < 0 → correct value
+    std::vector<std::uint8_t> app_data{};  // user data after the TC sec header
 };
 
 // Ground-side PUS-C TC encoder. Pure: any structural problem is
-// exercised through TcOpts, not asserted here.
+// exercised through TcOpts, not asserted here. With an empty app_data
+// this is byte-identical to the original 13-byte PUS-17[1] builder.
 std::vector<std::uint8_t> build_tc(const TcOpts& o) {
-    std::vector<std::uint8_t> tc(MIGRIS_PUS17_TC_PACKET_SIZE, 0U);
+    const std::size_t tc_size = MIGRIS_CCSDS_PRIMARY_HEADER_SIZE +
+                                MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE + o.app_data.size() + 2U;
+    std::vector<std::uint8_t> tc(tc_size, 0U);
 
     const std::uint16_t dl =
         (o.data_length_override >= 0)
             ? static_cast<std::uint16_t>(o.data_length_override)
-            : static_cast<std::uint16_t>(MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE + 2U - 1U);
+            : static_cast<std::uint16_t>(MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE +
+                                         o.app_data.size() + 2U - 1U);
 
     const migris_ccsds_primary_header_t primary = {0U,
                                                    MIGRIS_CCSDS_PACKET_TYPE_TC,
@@ -62,6 +68,12 @@ std::vector<std::uint8_t> build_tc(const TcOpts& o) {
         o.pus_version, o.ack_flags, o.service_type, o.service_subtype, o.source_id};
     migris_pus_tc_secondary_pack(
         &sec, &tc[MIGRIS_CCSDS_PRIMARY_HEADER_SIZE], tc.size() - MIGRIS_CCSDS_PRIMARY_HEADER_SIZE);
+
+    if (!o.app_data.empty()) {
+        std::memcpy(&tc[MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE],
+                    o.app_data.data(),
+                    o.app_data.size());
+    }
 
     const std::size_t crc_off = tc.size() - 2U;
     std::uint16_t crc = migris_crc16_ccitt_false(tc.data(), crc_off);
@@ -132,6 +144,29 @@ constexpr int pus1_complete_key =
 constexpr int pus1_complete_fail_key =
     MIGRIS_PUS_SERVICE_VERIFICATION * 256 + MIGRIS_PUS1_SUBTYPE_COMPLETION_FAILURE;
 constexpr int pus17_tm_key = MIGRIS_PUS_SERVICE_TEST * 256 + MIGRIS_PUS17_SUBTYPE_ARE_YOU_ALIVE_TM;
+constexpr int pus3_hk_key =
+    MIGRIS_PUS_SERVICE_HOUSEKEEPING * 256 + MIGRIS_PUS3_SUBTYPE_HK_PARAM_REPORT;
+
+// Param-block offsets within a PUS-3[25] report's *source data*
+// (docs/wire/pus-3.md); source data starts after primary(6)+TMsec(10).
+constexpr std::size_t hk_off_accepted = 17U;
+constexpr std::size_t hk_off_drops = 25U;
+
+// One-shot-poll TC application data = the Structure ID, big-endian.
+std::vector<std::uint8_t> sid_app(std::uint16_t sid) {
+    return {static_cast<std::uint8_t>(sid >> 8), static_cast<std::uint8_t>(sid & 0xFFU)};
+}
+
+// Big-endian u32 from a PUS-3[25] packet at `pkt`, `src_off` bytes
+// into its source data.
+std::uint32_t hk_u32(const std::uint8_t* pkt, std::size_t src_off) {
+    const std::size_t at =
+        MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TM_SECONDARY_HEADER_SIZE + src_off;
+    return (static_cast<std::uint32_t>(pkt[at]) << 24) |
+           (static_cast<std::uint32_t>(pkt[at + 1U]) << 16) |
+           (static_cast<std::uint32_t>(pkt[at + 2U]) << 8) |
+           static_cast<std::uint32_t>(pkt[at + 3U]);
+}
 
 migris_tc_router_ctx_t make_ctx() {
     migris_tc_router_ctx_t ctx{};
@@ -232,7 +267,9 @@ TEST(TcRouter, BadCrcWithoutAckFlagsIsSilent) {
 
 TEST(TcRouter, UnknownServiceFailsAcceptance) {
     auto ctx = make_ctx();
-    const auto tc = build_tc({.service_type = 3U,
+    // Service 99 is not routable on this AP (17 and 3 are). Service 3
+    // is now a valid service — see the PUS-3 tests below.
+    const auto tc = build_tc({.service_type = 99U,
                               .service_subtype = 1U,
                               .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE,
                               .source_id = 0x42U});
@@ -364,6 +401,136 @@ TEST(TcRouterAccept, IgnoresWrongApidAndFlagsBadCrc) {
     migris_tc_accept(bad_crc.data(), bad_crc.size(), test_apid, &r);
     EXPECT_EQ(r.addressed, 1);
     EXPECT_EQ(r.fc, MIGRIS_PUS1_FC_CRC_FAILURE);
+}
+
+// --- PUS-3 housekeeping: the router is now multi-service ---------------
+
+TEST(TcRouterAccept, ClassifiesPus3OneShotPollAsAccepted) {
+    migris_tc_accept_result_t r{};
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                              .service_subtype = MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL,
+                              .source_id = 0x55U,
+                              .app_data = sid_app(MIGRIS_PUS3_SID_FRAMEWORK_DIAG)});
+    migris_tc_accept(tc.data(), tc.size(), test_apid, &r);
+    EXPECT_EQ(r.addressed, 1);
+    EXPECT_EQ(r.fc, MIGRIS_PUS1_FC_NONE);
+    EXPECT_EQ(r.service_type, MIGRIS_PUS_SERVICE_HOUSEKEEPING);
+    EXPECT_EQ(r.service_subtype, MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL);
+    EXPECT_EQ(r.source_id, 0x55U);
+}
+
+TEST(TcRouter, Pus3OneShotPollEmitsHkReport) {
+    auto ctx = make_ctx();
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                              .service_subtype = MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL,
+                              .source_id = 0xCAFEU,
+                              .app_data = sid_app(MIGRIS_PUS3_SID_FRAMEWORK_DIAG)});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    ASSERT_EQ(n, static_cast<int>(MIGRIS_PUS3_HK_TM_PACKET_SIZE));
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 1U);
+    EXPECT_EQ(key(tms[0]), pus3_hk_key);
+    EXPECT_EQ(tms[0].secondary.destination_id, 0xCAFEU);  // echoes the poll source
+    EXPECT_EQ(tms[0].primary.seq_count, 0U);
+    EXPECT_TRUE(tms[0].crc_ok);
+}
+
+TEST(TcRouter, Pus3PollAcceptanceAndCompletionEmitThreePackets) {
+    auto ctx = make_ctx();
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                  .service_subtype = MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x1234U,
+                  .app_data = sid_app(MIGRIS_PUS3_SID_FRAMEWORK_DIAG)});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    // 22 + 47 + 22 = 91 — proves the MIGRIS_TC_ROUTER_MAX_TM bump.
+    ASSERT_EQ(n, static_cast<int>(MIGRIS_PUS1_SUCCESS_TM_PACKET_SIZE +
+                                  MIGRIS_PUS3_HK_TM_PACKET_SIZE +
+                                  MIGRIS_PUS1_SUCCESS_TM_PACKET_SIZE));
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 3U);
+    EXPECT_EQ((std::array<int, 3>{key(tms[0]), key(tms[1]), key(tms[2])}),
+              (std::array<int, 3>{pus1_accept_key, pus3_hk_key, pus1_complete_key}));
+    EXPECT_EQ((std::array<int, 3>{
+                  tms[0].primary.seq_count, tms[1].primary.seq_count, tms[2].primary.seq_count}),
+              (std::array<int, 3>{0, 1, 2}));
+    EXPECT_TRUE(tms[0].crc_ok && tms[1].crc_ok && tms[2].crc_ok);
+    EXPECT_EQ(tms[2].secondary.destination_id, 0x1234U);
+}
+
+TEST(TcRouter, Pus3UnknownSidAcceptedButCompletionFails) {
+    auto ctx = make_ctx();
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                  .service_subtype = MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x9001U,
+                  .app_data = sid_app(0x0099U)});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 2U);  // accept ok, no report, completion failure
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_fail_key}));
+    EXPECT_EQ(tms[1].failure_code, static_cast<int>(MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE));
+}
+
+TEST(TcRouter, Pus3UnknownSubtypeAcceptedButCompletionFails) {
+    auto ctx = make_ctx();
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                  .service_subtype = 99U,  // service 3 routable, subtype 99 is not
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x7U});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_fail_key}));
+    EXPECT_EQ(tms[1].failure_code, static_cast<int>(MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE));
+}
+
+TEST(TcRouter, AcceptedRejectedCountersTrackVerdicts) {
+    auto ctx = make_ctx();
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const auto ok17 = build_tc({.source_id = 0x1U});
+    const auto bad17 = build_tc({.corrupt_crc = true});
+    const auto ok3 = build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                               .service_subtype = MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL,
+                               .source_id = 0x2U,
+                               .app_data = sid_app(MIGRIS_PUS3_SID_FRAMEWORK_DIAG)});
+    migris_tc_router_dispatch(&ctx, 0U, ok17.data(), ok17.size(), out.data(), out.size());
+    migris_tc_router_dispatch(&ctx, 0U, bad17.data(), bad17.size(), out.data(), out.size());
+    migris_tc_router_dispatch(&ctx, 0U, ok3.data(), ok3.size(), out.data(), out.size());
+
+    EXPECT_EQ(ctx.tc_accepted_count, 2U);
+    EXPECT_EQ(ctx.tc_rejected_count, 1U);
+}
+
+TEST(TcRouter, HkReportCarriesRouterCounters) {
+    auto ctx = make_ctx();
+    ctx.rx_ring_overflow_drops = 0x12345678U;  // application-snapshotted ISR count
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                              .service_subtype = MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL,
+                              .source_id = 0x3U,
+                              .app_data = sid_app(MIGRIS_PUS3_SID_FRAMEWORK_DIAG)});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    ASSERT_EQ(n, static_cast<int>(MIGRIS_PUS3_HK_TM_PACKET_SIZE));
+    // The accepted counter is advanced (to 1) before routing, so this
+    // very report observes itself counted.
+    EXPECT_EQ(hk_u32(out.data(), hk_off_accepted), 1U);
+    EXPECT_EQ(hk_u32(out.data(), hk_off_drops), 0x12345678U);
 }
 
 }  // namespace

@@ -8,6 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-7: PUS-3 housekeeping & diagnostic telemetry.** New
+  freestanding C housekeeping-report encoder (`lib/pus/pus3.{h,c}`),
+  used by **both** a spontaneous periodic emitter and a TC[3,27]
+  one-shot poll, for one predefined framework structure
+  (`SID 0x0001 FRAMEWORK_DIAG`) carrying a frozen 27-byte parameter
+  block: uptime, the shared TM sequence count it consumed, the
+  per-service PUS message counters, and three new TC-router counters —
+  **TC accepted**, **TC rejected**, and **UART RX-ring overflow drops**
+  (previously silently dropped in the RX ISR, now counted). The TC
+  router is generalised from a hardcoded-PUS-17-only accept+dispatch to
+  a service-type `switch` (PUS-17 + PUS-3); the `tc_uart` sample emits
+  the periodic report from its main loop on a coarse FSW-clock
+  elapsed-time check (Kconfig `CONFIG_FSW_PUS3_HK_PERIOD_SEC`),
+  threading the router's shared per-APID sequence count so it stays
+  strictly monotonic across the boot event, every verification /
+  service burst, and each periodic report. New host suite
+  `tests/pus3_test.cpp`; `tests/tc_router_test.cpp` extended for the
+  generalised accept and TC[3,27] routing/counters; a new
+  short-period Renode build drives `tests/renode/test_tc_uart_hk.py`
+  (periodic appearance, FSW-clock cadence, one-shot-poll round-trip,
+  RX-drop wiring). Wire format pinned in
+  [`docs/wire/pus-3.md`](docs/wire/pus-3.md). Scoped decisions:
+  - Structure-management subtypes (`[1]/[2]/[3]/[4]` create/delete) and
+    periodic-generation control (`[5]/[6]` enable/disable) are
+    **deferred**: all presuppose a parameter datapool the framework
+    does not have yet. Only one predefined structure; dynamic
+    creation lands with the datapool.
+  - Structure IDs `0x0001`–`0x00FF` are reserved for fsw-core
+    *framework* structures; `0x0100`+ is mission-owned (scheme pinned
+    when `cry4-fsw` bootstraps), mirroring the PUS-5 event-ID split and
+    the pinned "PUS-128+ vendor assignments live downstream" decision.
+  - **`switch`, not a registration table.** A service-type switch over
+    two services is correct and minimal; a function-pointer dispatch
+    table is the *next* abstraction, earned at a third independent
+    service.
+  - **PUS-5 counters are zero on the [27]-polled path.** The router
+    does not own the PUS-5 context; hoisting it in is the deferred
+    "FDIR raises events from inside the router" abstraction. The
+    spontaneous report (emitted by the context owner) carries live
+    values. Asymmetry pinned in `docs/wire/pus-3.md`.
+  - **No event/FIFO for the RX-drop counter.** A single-writer (ISR) /
+    single-reader (loop) `volatile uint32_t` snapshot is the minimal
+    correct mechanism; the bounded event FIFO stays deferred (same
+    rationale as fsw-6).
 - **Slice fsw-6: PUS-5 event reporting.** New freestanding C
   event-report encoder (`lib/pus/pus5.{h,c}`) for the four severity
   subtypes — informative [1], low [2], medium [3], high [4] anomaly —
@@ -62,6 +106,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Wire format pinned in [`docs/wire/pus-1.md`](docs/wire/pus-1.md).
 
 ### Changed
+- **`MIGRIS_TC_ROUTER_MAX_TM` raised 64 → 96** (fsw-7). The worst-case
+  single-TC burst is now `PUS-1[1] (22) + PUS-3[25] (47) + PUS-1[7]
+  (22) = 91`. This is a C-API / caller-buffer-size change only — **the
+  bytes on the wire are unchanged**. The `tc_uart` sample picks it up
+  automatically (`out[MIGRIS_TC_ROUTER_MAX_TM]`).
+- **Renode tc_uart is now built twice** (fsw-7). Renode fast-forwards
+  idle virtual time, so a fixed short housekeeping period would race
+  `test_tc_uart.py`'s fixed-offset reads non-deterministically. The
+  verification-stream ELF pins the period to "never within a test"
+  (`test_tc_uart.py` is unchanged and still deterministic); a dedicated
+  short-period ELF drives the new `test_tc_uart_hk.py`. The
+  `zephyr-build` / `renode-smoke` matrices and `conftest.py` gain the
+  `tc-hk` entry / `tc_hk_running` fixture / `FSW_CORE_TC_HK_ELF` env
+  var.
 - **TM sequence count is now shared per-APID.** It moved out of the
   per-service context into the new TC router context, so PUS-1 and
   PUS-17 packets emitted for one TC share a single, strictly

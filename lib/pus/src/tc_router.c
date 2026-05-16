@@ -17,6 +17,7 @@
 
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
+#include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus17.h"
 #include "migris/fsw/pus/pus_tc.h"
 
@@ -91,12 +92,82 @@ void migris_tc_accept(const uint8_t* tc,
         out->fc = MIGRIS_PUS1_FC_BAD_PUS_VERSION;
         return;
     }
-    if (sec.service_type != MIGRIS_PUS_SERVICE_TEST) {
+    if (sec.service_type != MIGRIS_PUS_SERVICE_TEST &&
+        sec.service_type != MIGRIS_PUS_SERVICE_HOUSEKEEPING) {
         out->fc = MIGRIS_PUS1_FC_UNKNOWN_SERVICE;
         return;
     }
 
     out->fc = MIGRIS_PUS1_FC_NONE; /* accepted */
+}
+
+/* Execute a routed PUS-3 TC. The only inbound subtype is [27]
+ * "generate a one-shot housekeeping report", whose application data is
+ * exactly one Structure ID. Writes the [25] report into `out` and
+ * returns its byte count, or 0 with `*exec_fc` set to the PUS-1
+ * completion-failure cause (bad subtype, malformed app data, or
+ * unknown SID — all surface to ground as UNKNOWN_SUBTYPE since the
+ * structure ID space is the addressable unit here).
+ *
+ * The PUS-5 message counters are reported as zero on this path: the
+ * router does not own the PUS-5 context. Hoisting it in is the
+ * deferred "FDIR raises events from inside the router" abstraction
+ * (see pus5.h); the application's spontaneous report carries the live
+ * PUS-5 counters. */
+static int router_pus3_oneshot(migris_tc_router_ctx_t* ctx,
+                               const migris_tc_accept_result_t* v,
+                               uint32_t now_seconds,
+                               const uint8_t* tc,
+                               size_t tc_len,
+                               uint8_t* out,
+                               size_t out_cap,
+                               migris_pus1_failure_code_t* exec_fc) {
+    if (v->service_subtype != MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL) {
+        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
+        return 0;
+    }
+
+    /* accept() verified tc_len equals the declared total and is at
+     * least MIGRIS_TC_ROUTER_MIN_TC (primary + TC sec + CRC), so
+     * app_off + 2 <= tc_len and this subtraction cannot underflow. */
+    const size_t app_off =
+        MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE;
+    const size_t app_len = tc_len - app_off - 2U;
+    if (app_len != MIGRIS_PUS3_POLL_TC_APP_DATA_SIZE) {
+        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
+        return 0;
+    }
+    const migris_pus3_sid_t sid = (migris_pus3_sid_t)(((uint16_t)tc[app_off] << 8) |
+                                                      (uint16_t)tc[app_off + 1U]);
+
+    migris_pus3_hk_params_t p;
+    for (size_t i = 0U; i < 4U; ++i) {
+        p.pus1_msg_counter[i] = ctx->pus1.msg_counter[i];
+        p.pus5_msg_counter[i] = 0U;
+    }
+    p.pus17_tm_msg_counter = ctx->pus17.tm_msg_counter;
+    p.tc_accepted_count = ctx->tc_accepted_count;
+    p.tc_rejected_count = ctx->tc_rejected_count;
+    p.rx_ring_overflow_drops = ctx->rx_ring_overflow_drops;
+
+    const int rc = migris_pus3_build_hk_report(&ctx->pus3,
+                                               ctx->apid,
+                                               &ctx->tm_seq_count,
+                                               now_seconds,
+                                               sid,
+                                               &p,
+                                               v->source_id,
+                                               out,
+                                               out_cap);
+    if (rc > 0) {
+        return rc;
+    }
+    if (rc == MIGRIS_PUS3_ERR_UNKNOWN_SID) {
+        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
+    } else {
+        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+    }
+    return 0;
 }
 
 int migris_tc_router_dispatch(migris_tc_router_ctx_t* ctx,
@@ -123,6 +194,19 @@ int migris_tc_router_dispatch(migris_tc_router_ctx_t* ctx,
     uint8_t request_id[MIGRIS_PUS1_REQUEST_ID_SIZE];
     for (size_t i = 0U; i < MIGRIS_PUS1_REQUEST_ID_SIZE; ++i) {
         request_id[i] = tc[i];
+    }
+
+    /* Count every addressed TC exactly once, by acceptance verdict.
+     * `addressed == 0` already returned above, so noise / wrong-APID
+     * packets never reach this. Both the length-error and the
+     * other-failure paths below return, and the accepted path falls
+     * through — each route is covered here exactly once. These two
+     * counters are surfaced in the framework PUS-3 housekeeping
+     * structure. */
+    if (v.fc != MIGRIS_PUS1_FC_NONE) {
+        ctx->tc_rejected_count++;
+    } else {
+        ctx->tc_accepted_count++;
     }
 
     size_t off = 0U;
@@ -182,23 +266,50 @@ int migris_tc_router_dispatch(migris_tc_router_ctx_t* ctx,
         }
     }
 
-    /* Route to the service handler. migris_tc_accept already rejected
-     * any service type other than PUS-17, so this is the only arm. */
+    /* Route to the service handler by service type. migris_tc_accept
+     * already rejected every type other than PUS-17 and PUS-3, so the
+     * default arm is unreachable — it is kept only to make the switch
+     * total. Subtype validity is an execution-stage concern: an
+     * accepted TC with an unsupported subtype routes here and yields a
+     * PUS-1[8] completion failure (UNKNOWN_SUBTYPE), never an
+     * acceptance failure. */
     migris_pus1_failure_code_t exec_fc = MIGRIS_PUS1_FC_NONE;
-    const int rc = migris_pus17_execute(&ctx->pus17,
-                                        ctx->apid,
-                                        &ctx->tm_seq_count,
-                                        now_seconds,
-                                        v.service_subtype,
-                                        v.source_id,
-                                        &out[off],
-                                        out_cap - off);
-    if (rc > 0) {
-        off += (size_t)rc;
-    } else if (rc == MIGRIS_PUS17_ERR_NOT_PUS17_TC) {
-        exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
-    } else {
+    switch (v.service_type) {
+    case MIGRIS_PUS_SERVICE_TEST: {
+        const int rc = migris_pus17_execute(&ctx->pus17,
+                                            ctx->apid,
+                                            &ctx->tm_seq_count,
+                                            now_seconds,
+                                            v.service_subtype,
+                                            v.source_id,
+                                            &out[off],
+                                            out_cap - off);
+        if (rc > 0) {
+            off += (size_t)rc;
+        } else if (rc == MIGRIS_PUS17_ERR_NOT_PUS17_TC) {
+            exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
+        } else {
+            exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+        }
+        break;
+    }
+    case MIGRIS_PUS_SERVICE_HOUSEKEEPING: {
+        const int rc = router_pus3_oneshot(ctx,
+                                           &v,
+                                           now_seconds,
+                                           tc,
+                                           tc_len,
+                                           &out[off],
+                                           out_cap - off,
+                                           &exec_fc);
+        if (rc > 0) {
+            off += (size_t)rc;
+        }
+        break;
+    }
+    default:
         exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+        break;
     }
 
     if ((v.ack_flags & MIGRIS_PUS_TC_ACK_COMPLETION) != 0U) {

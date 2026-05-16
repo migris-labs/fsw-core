@@ -120,6 +120,18 @@ PUS5_BARE_TM_PACKET_SIZE = 20
 # fsw-core framework event-definition IDs (reserved block 0x0001..0x00FF).
 PUS5_EVT_FSW_BOOT = 0x0001
 
+# PUS-3 housekeeping & diagnostic data reporting (docs/wire/pus-3.md).
+PUS_SERVICE_HOUSEKEEPING = 3
+PUS_3_SUBTYPE_HK_PARAM_REPORT = 25  # TM, the report
+PUS_3_SUBTYPE_ONE_SHOT_POLL = 27  # TC, "generate one shot"
+
+PUS3_SID_SIZE = 2
+# Reserved framework-structure block 0x0001..0x00FF (mission 0x0100+).
+PUS3_SID_FRAMEWORK_DIAG = 0x0001
+PUS3_HK_SOURCE_DATA_SIZE = 29  # SID(2) + 27-byte param block
+# primary 6 + TM sec 10 + source data 29 + CRC 2.
+PUS3_HK_TM_PACKET_SIZE = 47
+
 
 @dataclass
 class PusTcSecondary:
@@ -213,17 +225,19 @@ def build_tc(
     apid: int = FSW_APID,
     seq_count: int = 0,
     source_id: int = 0,
+    app_data: bytes = b"",
     data_length: int | None = None,
 ) -> bytes:
-    """Encode a complete PUS-C TC packet (CRC included). ``data_length``
-    overrides the (correct) CCSDS Packet Data Length so length-error
-    paths can be exercised."""
+    """Encode a complete PUS-C TC packet (CRC included). ``app_data`` is
+    appended after the TC secondary header (e.g. a PUS-3[27] Structure
+    ID). ``data_length`` overrides the (correct) CCSDS Packet Data
+    Length so length-error paths can be exercised."""
     primary = CcsdsPrimary(
         type=PACKET_TYPE_TC,
         sec_hdr_flag=1,
         apid=apid,
         seq_count=seq_count,
-        data_length=(PUS_TC_SECONDARY_HEADER_SIZE + 2 - 1)
+        data_length=(PUS_TC_SECONDARY_HEADER_SIZE + len(app_data) + 2 - 1)
         if data_length is None
         else data_length,
     )
@@ -233,8 +247,29 @@ def build_tc(
         service_subtype=service_subtype,
         source_id=source_id,
     )
-    body = primary.pack() + tc_sec.pack()
+    body = primary.pack() + tc_sec.pack() + app_data
     return body + struct.pack(">H", crc16_ccitt_false(body))
+
+
+def build_pus3_oneshot_poll_tc(
+    *,
+    sid: int = PUS3_SID_FRAMEWORK_DIAG,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-3[27] one-shot-poll TC. Application data is
+    exactly the 2-byte big-endian Structure ID."""
+    return build_tc(
+        service_type=PUS_SERVICE_HOUSEKEEPING,
+        service_subtype=PUS_3_SUBTYPE_ONE_SHOT_POLL,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+        app_data=struct.pack(">H", sid),
+    )
 
 
 def build_pus17_are_you_alive_tc(
@@ -324,3 +359,9 @@ class DecodedTm:
         """The PUS-5 auxiliary data (source data after the 2-byte
         event ID). Only meaningful for PUS-5 TM."""
         return self.source_data[PUS5_EVENT_ID_SIZE:]
+
+    @property
+    def pus3_sid(self) -> int:
+        """The PUS-3 Structure ID (first 2 source-data bytes,
+        big-endian). Only meaningful for PUS-3[25] TM."""
+        return int.from_bytes(self.source_data[:PUS3_SID_SIZE], "big")

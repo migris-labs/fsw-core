@@ -33,6 +33,7 @@
 #define MIGRIS_FSW_PUS_TC_ROUTER_H_
 
 #include "migris/fsw/pus/pus1.h"
+#include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus17.h"
 #include "migris/fsw/pus/pus_tc.h"
 
@@ -43,12 +44,15 @@
 extern "C" {
 #endif
 
-/** Upper bound on the bytes one inbound TC can produce: a PUS-1[1]
- *  acceptance report (22) + a PUS-17[2] response (18) + a PUS-1[7]
- *  completion report (22) = 62, rounded up for headroom. The caller's
- *  output buffer must be at least this large; the router checks once
- *  up front so no individual report can run out of space mid-burst. */
-#define MIGRIS_TC_ROUTER_MAX_TM 64U
+/** Upper bound on the bytes one inbound TC can produce. The largest
+ *  single-TC burst is a PUS-1[1] acceptance report (22) + the routed
+ *  service response + a PUS-1[7] completion report (22). The biggest
+ *  service response is a PUS-3[25] housekeeping parameter report (47,
+ *  vs PUS-17[2]'s 18), so the worst case is 22 + 47 + 22 = 91, rounded
+ *  up for headroom. The caller's output buffer must be at least this
+ *  large; the router checks once up front so no individual report can
+ *  run out of space mid-burst. */
+#define MIGRIS_TC_ROUTER_MAX_TM 96U
 
 /** TC router return / error codes. A non-negative return value from
  *  ``migris_tc_router_dispatch`` is the number of TM bytes written
@@ -68,6 +72,20 @@ typedef struct {
     uint16_t tm_seq_count;    /**< Shared CCSDS TM sequence count (mod 2^14). */
     migris_pus1_ctx_t pus1;   /**< PUS-1 per-subtype message counters. */
     migris_pus17_ctx_t pus17; /**< PUS-17 message counter. */
+    migris_pus3_ctx_t pus3;   /**< PUS-3 housekeeping report message counter. */
+    /** TCs addressed to this AP that passed acceptance. Owned and
+     *  advanced by ``migris_tc_router_dispatch``; reported in the
+     *  framework PUS-3 housekeeping structure. */
+    uint32_t tc_accepted_count;
+    /** TCs addressed to this AP that failed acceptance (length / CRC /
+     *  PUS version / unknown service). Owned and advanced by
+     *  ``migris_tc_router_dispatch``. */
+    uint32_t tc_rejected_count;
+    /** UART RX-ring bytes dropped on overflow. *Not* owned by the
+     *  router: the application snapshots its ISR-side counter into this
+     *  field before each dispatch / spontaneous report; the router only
+     *  reads it into a PUS-3[25] report. */
+    uint32_t rx_ring_overflow_drops;
 } migris_tc_router_ctx_t;
 
 /** Result of the generic accept-stage validation. ``addressed`` is 0

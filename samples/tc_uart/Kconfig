@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Migris Labs
+#
+# Application Kconfig for the tc_uart sample. Zephyr sources the
+# application-root Kconfig automatically; `source "Kconfig.zephyr"`
+# keeps every base symbol available so prj.conf still works.
+
+source "Kconfig.zephyr"
+
+config FSW_PUS3_HK_PERIOD_SEC
+	int "PUS-3 housekeeping report period (seconds)"
+	default 5
+	range 1 86400
+	help
+	  Interval between spontaneous PUS-3[25] housekeeping parameter
+	  reports emitted by the main loop. The cadence is a coarse
+	  main-loop elapsed-time check against the FSW clock
+	  (k_uptime_get()/1000), not a kernel timer. The default (5 s) is
+	  operationally sane. The Renode closed-loop suite builds two
+	  artefacts from this one sample: the verification-stream ELF pins
+	  this to 86400 (effectively "never within a test" — Renode
+	  fast-forwards idle virtual time, so a fixed short period would
+	  race the fixed-offset reads non-deterministically), and a
+	  dedicated housekeeping ELF pins it to 2 s for fast, deterministic
+	  cadence assertions.
