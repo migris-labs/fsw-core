@@ -57,7 +57,7 @@ its own APIDs and document them in its own wire-format docs.
 | Sec. Header Flag (S)| 1   | `1` (present — PUS packets always have one)  |
 | APID               | 11   | `0x100`                                      |
 | Sequence Flags     | 2    | `11` (unsegmented)                           |
-| Sequence Count     | 14   | Monotonically increasing per direction       |
+| Sequence Count     | 14   | Monotonic per APID per direction — **one shared count space across all services** the AP emits (CCSDS 133.0-B-2) |
 | Packet Data Length | 16   | `(bytes in data field) − 1`                  |
 
 The *data field* = secondary header + user data + (optional) packet
@@ -82,7 +82,7 @@ Used on every TC packet we send to the FSW.
 | Field          | Bits | Value used                                       |
 |----------------|------|--------------------------------------------------|
 | PUS Version    | 4    | `0010` (PUS-C)                                   |
-| Ack Flags      | 4    | `0000` for slice fsw-4 (no PUS-1 yet)            |
+| Ack Flags      | 4    | Honoured as of slice fsw-5 — each set bit requests the matching PUS-1 verification report (see [`pus-1.md`](pus-1.md)). `0000` requests none |
 | Service Type   | 8    | `17` for the Test service                        |
 | Service Subtype| 8    | `1` for "perform an are-you-alive connection test"|
 | Source ID      | 16   | Ground-side identifier (operator-assignable; `0x0000` is fine for tests) |
@@ -178,7 +178,13 @@ offset  bytes        meaning
 
 The FSW echoes the Destination ID from the TC's Source ID. The TM
 Sequence Count is independent of the TC's count (TM and TC have
-separate count spaces, per CCSDS).
+separate count spaces, per CCSDS), and as of slice fsw-5 it is a
+single per-APID counter shared with PUS-1 and every other service the
+AP emits — consecutive packets in a verification burst (e.g.
+`PUS-1[1] · PUS-17[2] · PUS-1[7]`) carry strictly increasing counts.
+Slice fsw-5 reshaped the on-board C API (the sequence count moved out
+of the per-service context into the TC router) but **the bytes on the
+wire are unchanged** — this is not a wire-breaking change.
 
 ## UART framing
 

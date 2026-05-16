@@ -11,10 +11,15 @@
  * [4] its report) are not in the Migris PUS baseline yet — see
  * workspace CLAUDE.md.
  *
- * The handler is freestanding: caller provides input/output buffers
- * and the current time (so on-board code can pass the boot clock and
- * host tests can pass a fixed value). State is held in a
- * caller-owned context struct.
+ * As of slice fsw-5 this is a *leaf service*: generic TC reception
+ * (CCSDS primary / length / CRC / PUS-C version / APID checks) lives
+ * in the TC router, which validates and routes a TC, then calls
+ * ``migris_pus17_execute`` with the already-parsed subtype and source
+ * ID. PUS-17 only owns its own subtype check and its [2] response.
+ *
+ * Freestanding C: caller provides the output buffer, the current
+ * time, the shared per-APID TM sequence count, and a caller-owned
+ * context holding this service's PUS message counter.
  */
 
 #ifndef MIGRIS_FSW_PUS_PUS17_H_
@@ -40,42 +45,46 @@ extern "C" {
 #define MIGRIS_PUS17_TC_PACKET_SIZE 13U
 
 /** State carried across PUS-17 invocations on the FSW side. The
- *  caller (sample app, downstream mission FSW) owns the storage and
- *  zero-initialises it once at startup. */
+ *  caller (the TC router, ultimately the sample app / mission FSW)
+ *  owns the storage and zero-initialises it once at startup. The
+ *  CCSDS TM sequence count is *not* here — it is shared per-APID
+ *  across every service and lives in the TC router context. */
 typedef struct {
-    uint16_t apid;          /**< APID this AP receives on and emits with. */
-    uint16_t tm_seq_count;  /**< Next CCSDS Sequence Count for TM (mod 2^14). */
     uint8_t tm_msg_counter; /**< Next PUS-17[2] Message Counter (mod 2^8). */
 } migris_pus17_ctx_t;
 
 /** PUS-17 handler return / error codes. */
 typedef enum {
     MIGRIS_PUS17_OK = 0,
-    MIGRIS_PUS17_ERR_TRUNCATED = -1,       /**< TC shorter than declared. */
-    MIGRIS_PUS17_ERR_BAD_PRIMARY = -2,     /**< Type, APID, or sec-hdr flag mismatch. */
-    MIGRIS_PUS17_ERR_BAD_CRC = -3,         /**< CRC verification failed on the TC. */
-    MIGRIS_PUS17_ERR_NOT_PUS17_TC = -4,    /**< Service/subtype is not (17, 1). */
-    MIGRIS_PUS17_ERR_BAD_PUS_VERSION = -5, /**< TC secondary header PUS version not C. */
-    MIGRIS_PUS17_ERR_BUF_TOO_SMALL = -6    /**< Output buffer < MIGRIS_PUS17_TM_PACKET_SIZE. */
+    MIGRIS_PUS17_ERR_NOT_PUS17_TC = -4, /**< Subtype is not (17, 1). */
+    MIGRIS_PUS17_ERR_BUF_TOO_SMALL = -6 /**< Output buffer < MIGRIS_PUS17_TM_PACKET_SIZE. */
 } migris_pus17_status_t;
 
-/** Decode a PUS-17[1] TC from ``tc`` (``tc_len`` bytes), validate its
- *  primary header / secondary header / CRC, then build the matching
- *  PUS-17[2] TM into ``tm`` (``tm_cap`` bytes capacity).
+/** Execute an already-accepted, already-routed PUS-17 TC.
  *
- *  On success returns ``MIGRIS_PUS17_TM_PACKET_SIZE`` (positive value
- *  — number of bytes written). On failure returns a negative
- *  ``migris_pus17_status_t``.
+ *  The caller (TC router) has validated the CCSDS primary header,
+ *  packet length, CRC, and PUS-C version, and has confirmed the
+ *  service type is 17. It passes the parsed ``service_subtype`` and
+ *  the TC's ``tc_source_id``. This function checks the subtype is the
+ *  are-you-alive request (1) and, if so, builds the PUS-17[2]
+ *  response into ``tm`` for application process ``apid``.
  *
- *  Side effects: bumps ``ctx->tm_seq_count`` and ``ctx->tm_msg_counter``
- *  on success only. A failed TC validation leaves the context state
- *  unchanged so the next valid TC produces consecutively-numbered TM. */
-int migris_pus17_handle_are_you_alive(migris_pus17_ctx_t* ctx,
-                                      uint32_t now_seconds,
-                                      const uint8_t* tc,
-                                      size_t tc_len,
-                                      uint8_t* tm,
-                                      size_t tm_cap);
+ *  ``tm_seq_count`` is the shared per-APID CCSDS TM sequence count:
+ *  read into the response, then advanced mod 2^14.
+ *
+ *  Returns ``MIGRIS_PUS17_TM_PACKET_SIZE`` (positive — bytes written)
+ *  on success. Returns ``MIGRIS_PUS17_ERR_NOT_PUS17_TC`` for an
+ *  unsupported subtype and ``MIGRIS_PUS17_ERR_BUF_TOO_SMALL`` for an
+ *  undersized buffer; on either, ``ctx`` and ``*tm_seq_count`` are
+ *  left unchanged. */
+int migris_pus17_execute(migris_pus17_ctx_t* ctx,
+                         uint16_t apid,
+                         uint16_t* tm_seq_count,
+                         uint32_t now_seconds,
+                         uint8_t service_subtype,
+                         uint16_t tc_source_id,
+                         uint8_t* tm,
+                         size_t tm_cap);
 
 #ifdef __cplusplus
 }  // extern "C"

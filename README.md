@@ -11,9 +11,9 @@ any specific mission. Mission-specific application software (e.g.
 [`cry4-fsw`](../cry4-fsw)) consumes `migris::fsw-core` as a versioned
 dependency.
 
-## Status — slice fsw-4 (PUS-17 connection test over UART)
+## Status — slice fsw-5 (PUS-1 TC verification over UART)
 
-The repository now has four coherent faces:
+The repository now has these coherent faces:
 
 - **Host-side** (slice fsw-1): modern CMake (≥ 3.25) build, Conan 2
   recipe, GoogleTest unit tests, ASan / UBSan / TSan / clang-tidy
@@ -35,11 +35,18 @@ The repository now has four coherent faces:
   under `lib/pus/` (CCSDS Space Packet, CRC-16-CCITT-FALSE, PUS-C
   TC/TM secondary headers, PUS-17 handler) compiled into both
   `migris::fsw-core` (host, exercised by GoogleTest under
-  ASan/UBSan/clang-tidy) and the new `samples/pus17_uart` Zephyr
-  application (Cortex-M7). Round-trip is exercised end-to-end by
-  `tests/renode/test_pus17_uart.py`: ground sends a PUS-17[1] TC on
-  USART3, FSW replies with a PUS-17[2] TM. Wire format is pinned in
-  [`docs/wire/pus-17.md`](docs/wire/pus-17.md).
+  ASan/UBSan/clang-tidy) and the Zephyr sample (Cortex-M7). Wire
+  format is pinned in [`docs/wire/pus-17.md`](docs/wire/pus-17.md).
+- **TC verification + routing** (slice fsw-5): a freestanding C TC
+  reception / acceptance / routing layer (`lib/pus/tc_router.{h,c}`,
+  the framework's first dispatcher) plus a PUS-1 verification-report
+  encoder (`lib/pus/pus1.{h,c}`). The FSW emits PUS-1[1]/[2]
+  acceptance and PUS-1[7]/[8] completion reports around the routed
+  service response, gated by the TC's ack flags, with a single
+  shared per-APID CCSDS sequence count. The `samples/pus17_uart`
+  sample is generalised and renamed `samples/tc_uart`; the round
+  trip is exercised end-to-end by `tests/renode/test_tc_uart.py`.
+  Wire format is pinned in [`docs/wire/pus-1.md`](docs/wire/pus-1.md).
 
 ## Pinned target (workspace-level)
 
@@ -135,9 +142,11 @@ Renode and exercise USART3:
 
 - **`hello`** (fsw-3) — asserts the boot-banner contract strings
   appear on the UART within a bounded timeout.
-- **`pus17`** (fsw-4) — drives a full PUS-17 TC → TM round-trip over
-  the bidirectional UART socket and decodes the response against the
-  byte-level spec in `docs/wire/pus-17.md`.
+- **`tc`** (fsw-5) — drives full TC verification round-trips over the
+  bidirectional UART socket (PUS-1[1]/[7] acceptance + completion
+  around a PUS-17[2] response, and PUS-1[2] rejection paths) and
+  decodes the stream against `docs/wire/pus-1.md` and
+  `docs/wire/pus-17.md`.
 
 The same suite runs locally after a `west build`:
 
@@ -147,7 +156,7 @@ pytest tests/renode -v
 # Linux: put `renode` on PATH or set RENODE_BIN
 # Override ELF locations:
 #   FSW_CORE_HELLO_ELF=/abs/path/to/hello/zephyr.elf
-#   FSW_CORE_PUS17_ELF=/abs/path/to/pus17/zephyr.elf
+#   FSW_CORE_TC_ELF=/abs/path/to/tc/zephyr.elf
 ```
 
 For manual interactive debugging (attach the GUI analyzer, etc.):
@@ -156,7 +165,7 @@ For manual interactive debugging (attach the GUI analyzer, etc.):
 $ renode
 (monitor) $elf = @/abs/path/to/zephyr.elf
 (monitor) $uart_port = 4444
-(monitor) i @tests/renode/scripts/hello_nucleo_h753zi.resc   # or pus17_nucleo_h753zi.resc
+(monitor) i @tests/renode/scripts/hello_nucleo_h753zi.resc   # or tc_nucleo_h753zi.resc
 (monitor) start
 ```
 
@@ -168,8 +177,9 @@ Hello, fsw-core / nucleo_h753zi
 boot ok; idling
 ```
 
-For `pus17`, send a PUS-17[1] TC and read the 18-byte PUS-17[2] TM
-reply — see `samples/pus17_uart/README.md`.
+For `tc`, send a PUS-17[1] TC (optionally with ack flags set) and
+read the PUS-1 / PUS-17 TM stream back — see
+`samples/tc_uart/README.md`.
 
 See [`tests/renode/README.md`](tests/renode/README.md) for the
 fixture internals and troubleshooting.
@@ -183,18 +193,18 @@ fsw-core/
 ├── conanfile.py
 ├── west.yml                # Zephyr west manifest (T2 topology)
 ├── cmake/                  # Reusable CMake helpers (warnings, sanitizers, clang-tidy)
-├── docs/wire/              # Wire-format authoritative specs (pus-17.md, …)
+├── docs/wire/              # Wire-format authoritative specs (pus-1.md, pus-17.md, …)
 ├── include/migris/fsw/     # Host-side public C++ headers (<migris/fsw/…>)
-├── lib/pus/                # Freestanding C codec (CCSDS + PUS-C + PUS-17)
+├── lib/pus/                # Freestanding C codec (CCSDS + PUS-C + PUS-1/17 + TC router)
 │   ├── include/migris/fsw/pus/
 │   └── src/
 ├── src/                    # Host-side C++ implementation
 ├── tests/                  # Tests (GoogleTest host + pytest Renode smoke)
 │   ├── (host gtest sources)
-│   └── renode/             # fsw-3 / fsw-4 Renode-driven UART smoke (Python)
+│   └── renode/             # fsw-3 / fsw-5 Renode-driven UART smoke (Python)
 └── samples/                # Zephyr applications
     ├── hello/              # fsw-2 hello-world for nucleo_h753zi
-    └── pus17_uart/         # fsw-4 PUS-17 connection test over USART3
+    └── tc_uart/            # fsw-5 TC reception + verification over USART3
 ```
 
 `.west/`, `zephyr/`, `modules/` are workspace siblings created by

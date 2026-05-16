@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-# Copyright 2026 Migris Labs
+# SPDX-License-Identifier: Apache-2.0 Copyright 2026 Migris Labs
 
 cmake_minimum_required(VERSION 3.20.0)
 
