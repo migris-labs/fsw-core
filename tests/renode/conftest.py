@@ -73,6 +73,12 @@ def _find_elf(env_var: str, artefact_subdir: str, west_build_dir: str) -> Path |
 _RENODE_BIN = find_renode_binary()
 _HELLO_ELF = _find_elf("FSW_CORE_HELLO_ELF", "hello", "zephyr-hello")
 _TC_ELF = _find_elf("FSW_CORE_TC_ELF", "tc", "zephyr-tc")
+# Same tc_uart sample, built with a short PUS-3 housekeeping period so
+# the periodic-report cadence is fast and deterministic. The default
+# _TC_ELF pins the period to "never within a test" instead (Renode
+# fast-forwards idle virtual time, which would otherwise race the
+# verification suite's fixed-offset reads).
+_TC_HK_ELF = _find_elf("FSW_CORE_TC_HK_ELF", "tc-hk", "zephyr-tc-hk")
 
 
 def _boot(
@@ -112,3 +118,13 @@ def tc_running() -> Iterator[tuple[RenodeMonitor, UartCapture]]:
     assert _RENODE_BIN is not None
     assert _TC_ELF is not None
     yield from _boot(_TC_ELF, TC_RESC_PATH)
+
+
+@pytest.fixture
+def tc_hk_running() -> Iterator[tuple[RenodeMonitor, UartCapture]]:
+    """Boot the short-period housekeeping build of the tc_uart sample
+    (same .resc, different ELF) so the spontaneous PUS-3[25] cadence is
+    observable fast and deterministically. Yields ``(monitor, uart)``."""
+    assert _RENODE_BIN is not None
+    assert _TC_HK_ELF is not None
+    yield from _boot(_TC_HK_ELF, TC_RESC_PATH)

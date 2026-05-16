@@ -8,6 +8,7 @@ add_executable(
   pus1_test.cpp
   pus5_test.cpp
   pus17_test.cpp
+  pus3_test.cpp
   tc_router_test.cpp)
 
 target_link_libraries(fsw-core-tests PRIVATE migris::fsw-core GTest::gtest GTest::gtest_main)

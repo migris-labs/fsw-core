@@ -19,6 +19,7 @@ target_sources(
           ${MIGRIS_FSW_PUS_DIR}/src/pus1.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus5.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus17.c
+          ${MIGRIS_FSW_PUS_DIR}/src/pus3.c
           ${MIGRIS_FSW_PUS_DIR}/src/tc_router.c)
 
 target_include_directories(app PRIVATE ${MIGRIS_FSW_PUS_DIR}/include)

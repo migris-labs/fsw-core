@@ -43,6 +43,7 @@
  */
 
 #include "migris/fsw/pus/ccsds.h"
+#include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/tc_router.h"
 
@@ -74,6 +75,16 @@ static const struct device* const uart_dev = DEVICE_DT_GET(UART_NODE);
 #define RX_RING_SIZE 128
 RING_BUF_DECLARE(rx_ring, RX_RING_SIZE);
 
+/* UART RX-ring overflow drop count. Written only by the RX ISR,
+ * read (snapshotted) only by the main loop. A naturally-aligned
+ * 32-bit access is atomic on Cortex-M7 and telemetry only needs a
+ * recent value, so single-writer / single-reader + `volatile` (to
+ * defeat caching across loop iterations) is the minimal correct
+ * mechanism — no atomic_t, no irq-lock, no event FIFO (that
+ * abstraction stays deferred, see lib/pus/.../pus5.h and the fsw-6
+ * CHANGELOG entry). Surfaced in the PUS-3 housekeeping report. */
+static volatile uint32_t rx_ring_overflow_drops;
+
 static void uart_isr(const struct device* dev, void* user_data) {
     ARG_UNUSED(user_data);
 
@@ -88,13 +99,14 @@ static void uart_isr(const struct device* dev, void* user_data) {
             break;
         }
         /* Drop bytes when the ring fills — this is a smoke test, not
-         * a flow-controlled link. PUS-5 has landed (slice fsw-6), but
-         * raising an overflow event from here is deferred: this is
-         * ISR context with no TM output buffer, which is exactly the
-         * first real consumer that earns a freestanding bounded event
-         * FIFO (see lib/pus/.../pus5.h). Until that lands the drop is
-         * silent. */
-        (void)ring_buf_put(&rx_ring, &byte, 1);
+         * a flow-controlled link. The drop is now *counted* (slice
+         * fsw-7) and reported in the PUS-3 housekeeping structure;
+         * raising an asynchronous overflow *event* from ISR context
+         * still wants a freestanding bounded event FIFO and stays
+         * deferred (see lib/pus/.../pus5.h). */
+        if (ring_buf_put(&rx_ring, &byte, 1) != 1U) {
+            rx_ring_overflow_drops++;
+        }
     }
 }
 
@@ -102,6 +114,23 @@ static void uart_tx_blocking(const struct device* dev, const uint8_t* buf, size_
     for (size_t i = 0; i < len; ++i) {
         uart_poll_out(dev, buf[i]);
     }
+}
+
+/* Build the framework PUS-3 housekeeping parameter snapshot for the
+ * *spontaneous* periodic report. Unlike the router's [27]-poll path,
+ * this carries the live PUS-5 counters: the application owns the PUS-5
+ * context, so it can report it accurately. */
+static void fill_hk_params(const migris_tc_router_ctx_t* router,
+                           const migris_pus5_ctx_t* pus5_ctx,
+                           migris_pus3_hk_params_t* p) {
+    for (size_t i = 0U; i < 4U; ++i) {
+        p->pus1_msg_counter[i] = router->pus1.msg_counter[i];
+        p->pus5_msg_counter[i] = pus5_ctx->msg_counter[i];
+    }
+    p->pus17_tm_msg_counter = router->pus17.tm_msg_counter;
+    p->tc_accepted_count = router->tc_accepted_count;
+    p->tc_rejected_count = router->tc_rejected_count;
+    p->rx_ring_overflow_drops = router->rx_ring_overflow_drops;
 }
 
 int main(void) {
@@ -136,10 +165,11 @@ int main(void) {
      * migris_tc_router_ctx_t (alongside pus1/pus17) when an FDIR
      * consumer raises events from inside the router. */
     migris_pus5_ctx_t pus5_ctx = {0};
+    const uint32_t boot_sec = (uint32_t)(k_uptime_get() / 1000);
     const int boot_n = migris_pus5_build_event_report(&pus5_ctx,
                                                       ctx.apid,
                                                       &ctx.tm_seq_count,
-                                                      (uint32_t)(k_uptime_get() / 1000),
+                                                      boot_sec,
                                                       MIGRIS_PUS5_SEV_INFO,
                                                       MIGRIS_PUS5_EVT_FSW_BOOT,
                                                       NULL,
@@ -151,7 +181,48 @@ int main(void) {
         uart_tx_blocking(uart_dev, out, (size_t)boot_n);
     }
 
+    /* Slice fsw-7: spontaneous periodic PUS-3[25] housekeeping report.
+     * `pus3_ctx` is sample-local (same rationale as `pus5_ctx`). The
+     * first report fires one full period *after* boot — not
+     * immediately — so a sub-second TC exchange always completes within
+     * a period and the per-APID sequence stays a single monotonic
+     * space across the boot event, every verification / service burst,
+     * and each periodic report (all share `&ctx.tm_seq_count`, all run
+     * sequentially in this single thread). */
+    migris_pus3_ctx_t pus3_ctx = {0};
+    uint32_t last_hk_emit_sec = boot_sec;
+
     for (;;) {
+        /* One FSW-clock read per iteration, reused by the periodic
+         * report and the TC dispatch (the full TC completes in the
+         * same iteration its final byte arrives, microseconds after
+         * this read — coarse seconds are unaffected). */
+        const uint32_t now_sec = (uint32_t)(k_uptime_get() / 1000);
+
+        /* Spontaneous periodic housekeeping (slice fsw-7). Checked
+         * every iteration — including the idle path below, where most
+         * time is spent. The shared `out[]` is fully transmitted
+         * (blocking) before the loop proceeds, so a periodic report
+         * never overlaps a TC-driven burst. */
+        if (now_sec - last_hk_emit_sec >= (uint32_t)CONFIG_FSW_PUS3_HK_PERIOD_SEC) {
+            ctx.rx_ring_overflow_drops = rx_ring_overflow_drops;
+            migris_pus3_hk_params_t hp;
+            fill_hk_params(&ctx, &pus5_ctx, &hp);
+            const int hk_n = migris_pus3_build_hk_report(&pus3_ctx,
+                                                         ctx.apid,
+                                                         &ctx.tm_seq_count,
+                                                         now_sec,
+                                                         MIGRIS_PUS3_SID_FRAMEWORK_DIAG,
+                                                         &hp,
+                                                         0U,
+                                                         out,
+                                                         sizeof(out));
+            if (hk_n > 0) {
+                uart_tx_blocking(uart_dev, out, (size_t)hk_n);
+            }
+            last_hk_emit_sec = now_sec;
+        }
+
         uint8_t b = 0U;
         const uint32_t got = ring_buf_get(&rx_ring, &b, 1);
         if (got == 0U) {
@@ -178,7 +249,10 @@ int main(void) {
         }
 
         if (want != 0U && have == want) {
-            const uint32_t now_sec = (uint32_t)(k_uptime_get() / 1000);
+            /* Snapshot the ISR drop counter so a [27]-poll-triggered
+             * report and the accepted/rejected counters compose
+             * coherently within this dispatch. */
+            ctx.rx_ring_overflow_drops = rx_ring_overflow_drops;
             const int rc = migris_tc_router_dispatch(&ctx, now_sec, tc, have, out, sizeof(out));
             if (rc > 0) {
                 uart_tx_blocking(uart_dev, out, (size_t)rc);
