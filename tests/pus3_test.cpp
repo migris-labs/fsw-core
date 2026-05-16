@@ -207,7 +207,7 @@ TEST(Pus3, MessageCounterAdvancesMod2Pow8) {
                                           tm.size()),
               0);
     EXPECT_EQ(secondary_of(tm.data()).msg_counter, 0xFFU);  // pre-advance value on wire
-    EXPECT_EQ(ctx.msg_counter[0], 0U);                       // wrapped
+    EXPECT_EQ(ctx.msg_counter[0], 0U);                      // wrapped
 }
 
 TEST(Pus3, RejectsUnknownSidWithoutSideEffects) {
@@ -274,16 +274,10 @@ TEST(Pus3, RejectsNullArguments) {
                                           tm.data(),
                                           tm.size()),
               MIGRIS_PUS3_ERR_BAD_ARG);
-    EXPECT_EQ(migris_pus3_build_hk_report(&ctx,
-                                          test_apid,
-                                          &seq,
-                                          0U,
-                                          MIGRIS_PUS3_SID_FRAMEWORK_DIAG,
-                                          &p,
-                                          0U,
-                                          nullptr,
-                                          tm.size()),
-              MIGRIS_PUS3_ERR_BAD_ARG);
+    EXPECT_EQ(
+        migris_pus3_build_hk_report(
+            &ctx, test_apid, &seq, 0U, MIGRIS_PUS3_SID_FRAMEWORK_DIAG, &p, 0U, nullptr, tm.size()),
+        MIGRIS_PUS3_ERR_BAD_ARG);
 }
 
 }  // namespace

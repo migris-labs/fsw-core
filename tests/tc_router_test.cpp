@@ -11,8 +11,8 @@
 
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
-#include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus17.h"
+#include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus_tc.h"
 #include "migris/fsw/pus/pus_tm.h"
 
@@ -37,7 +37,7 @@ struct TcOpts {
     std::uint16_t apid = test_apid;
     bool corrupt_crc = false;
     std::uint8_t pus_version = MIGRIS_PUS_VERSION_C;
-    int data_length_override = -1;  // < 0 → correct value
+    int data_length_override = -1;         // < 0 → correct value
     std::vector<std::uint8_t> app_data{};  // user data after the TC sec header
 };
 
@@ -49,11 +49,10 @@ std::vector<std::uint8_t> build_tc(const TcOpts& o) {
                                 MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE + o.app_data.size() + 2U;
     std::vector<std::uint8_t> tc(tc_size, 0U);
 
-    const std::uint16_t dl =
-        (o.data_length_override >= 0)
-            ? static_cast<std::uint16_t>(o.data_length_override)
-            : static_cast<std::uint16_t>(MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE +
-                                         o.app_data.size() + 2U - 1U);
+    const std::uint16_t dl = (o.data_length_override >= 0)
+                                 ? static_cast<std::uint16_t>(o.data_length_override)
+                                 : static_cast<std::uint16_t>(MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE +
+                                                              o.app_data.size() + 2U - 1U);
 
     const migris_ccsds_primary_header_t primary = {0U,
                                                    MIGRIS_CCSDS_PACKET_TYPE_TC,
@@ -449,9 +448,9 @@ TEST(TcRouter, Pus3PollAcceptanceAndCompletionEmitThreePackets) {
 
     const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
     // 22 + 47 + 22 = 91 — proves the MIGRIS_TC_ROUTER_MAX_TM bump.
-    ASSERT_EQ(n, static_cast<int>(MIGRIS_PUS1_SUCCESS_TM_PACKET_SIZE +
-                                  MIGRIS_PUS3_HK_TM_PACKET_SIZE +
-                                  MIGRIS_PUS1_SUCCESS_TM_PACKET_SIZE));
+    ASSERT_EQ(n,
+              static_cast<int>(MIGRIS_PUS1_SUCCESS_TM_PACKET_SIZE + MIGRIS_PUS3_HK_TM_PACKET_SIZE +
+                               MIGRIS_PUS1_SUCCESS_TM_PACKET_SIZE));
     const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
     ASSERT_EQ(tms.size(), 3U);
     EXPECT_EQ((std::array<int, 3>{key(tms[0]), key(tms[1]), key(tms[2])}),
