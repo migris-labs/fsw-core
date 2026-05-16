@@ -2,15 +2,20 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Migris Labs
  *
- * fsw-5 TC reception + verification sample.
+ * fsw-6 TC reception + verification + event reporting sample.
  *
- * Boots Zephyr on nucleo_h753zi, listens on USART3 for a CCSDS Space
- * Packet, hands it to the TC router, and writes back whatever
- * verification / service TM the router produces. With PUS-1 in place
- * a single inbound TC can yield up to three packets — a PUS-1[1]
- * acceptance report, the PUS-17[2] service response, and a PUS-1[7]
- * completion report — depending on the TC's ack flags. Wire format
- * is pinned in docs/wire/pus-1.md and docs/wire/pus-17.md.
+ * Boots Zephyr on nucleo_h753zi, emits one spontaneous PUS-5[1]
+ * "FSW boot" informative event (the first TM the FSW produces, the
+ * slice fsw-6 demonstration of asynchronous, non-TC-triggered TM),
+ * then listens on USART3 for a CCSDS Space Packet, hands it to the
+ * TC router, and writes back whatever verification / service TM the
+ * router produces. With PUS-1 in place a single inbound TC can yield
+ * up to three packets — a PUS-1[1] acceptance report, the PUS-17[2]
+ * service response, and a PUS-1[7] completion report — depending on
+ * the TC's ack flags. The boot event consumes the first per-APID
+ * sequence count, so the first TC response starts at count 1. Wire
+ * format is pinned in docs/wire/pus-5.md, docs/wire/pus-1.md and
+ * docs/wire/pus-17.md.
  *
  * Architecture (slice-minimum):
  *
@@ -38,6 +43,7 @@
  */
 
 #include "migris/fsw/pus/ccsds.h"
+#include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/tc_router.h"
 
 #include <zephyr/device.h>
@@ -82,8 +88,12 @@ static void uart_isr(const struct device* dev, void* user_data) {
             break;
         }
         /* Drop bytes when the ring fills — this is a smoke test, not
-         * a flow-controlled link. Real downstream code will tie this
-         * to PUS-5 event reporting once that service lands. */
+         * a flow-controlled link. PUS-5 has landed (slice fsw-6), but
+         * raising an overflow event from here is deferred: this is
+         * ISR context with no TM output buffer, which is exactly the
+         * first real consumer that earns a freestanding bounded event
+         * FIFO (see lib/pus/.../pus5.h). Until that lands the drop is
+         * silent. */
         (void)ring_buf_put(&rx_ring, &byte, 1);
     }
 }
@@ -115,6 +125,31 @@ int main(void) {
     uint8_t out[MIGRIS_TC_ROUTER_MAX_TM];
     size_t have = 0U;
     size_t want = 0U; /* total TC size once the primary header is in */
+
+    /* Slice fsw-6: one spontaneous PUS-5[1] "FSW boot" event before
+     * the TC loop — the framework's first asynchronous, non-TC-
+     * triggered TM. It threads the router's shared per-APID
+     * `tm_seq_count` (a plain uint16_t field) so the boot event
+     * consumes count 0 and the per-APID sequence stays strictly
+     * monotonic across it and every subsequent verification / service
+     * packet. `pus5_ctx` is sample-local for now; it moves into
+     * migris_tc_router_ctx_t (alongside pus1/pus17) when an FDIR
+     * consumer raises events from inside the router. */
+    migris_pus5_ctx_t pus5_ctx = {0};
+    const int boot_n = migris_pus5_build_event_report(&pus5_ctx,
+                                                      ctx.apid,
+                                                      &ctx.tm_seq_count,
+                                                      (uint32_t)(k_uptime_get() / 1000),
+                                                      MIGRIS_PUS5_SEV_INFO,
+                                                      MIGRIS_PUS5_EVT_FSW_BOOT,
+                                                      NULL,
+                                                      0U,
+                                                      0U,
+                                                      out,
+                                                      sizeof(out));
+    if (boot_n > 0) {
+        uart_tx_blocking(uart_dev, out, (size_t)boot_n);
+    }
 
     for (;;) {
         uint8_t b = 0U;
