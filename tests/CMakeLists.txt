@@ -1,11 +1,7 @@
 find_package(GTest REQUIRED)
 
-add_executable(
-  fsw-core-tests
-  version_test.cpp
-  pus_ccsds_test.cpp
-  pus_secondary_test.cpp
-  pus17_test.cpp)
+add_executable(fsw-core-tests version_test.cpp pus_ccsds_test.cpp pus_secondary_test.cpp
+                              pus1_test.cpp pus17_test.cpp tc_router_test.cpp)
 
 target_link_libraries(fsw-core-tests PRIVATE migris::fsw-core GTest::gtest GTest::gtest_main)
 

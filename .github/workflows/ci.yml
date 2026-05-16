@@ -161,10 +161,10 @@ jobs:
             path: samples/hello
             build_dir: zephyr-hello
             artefact: fsw-core-hello-nucleo_h753zi
-          - name: samples/pus17_uart
-            path: samples/pus17_uart
-            build_dir: zephyr-pus17
-            artefact: fsw-core-pus17-nucleo_h753zi
+          - name: samples/tc_uart
+            path: samples/tc_uart
+            build_dir: zephyr-tc
+            artefact: fsw-core-tc-nucleo_h753zi
     env:
       ZEPHYR_SDK_VERSION: "0.16.8"
     steps:
@@ -231,11 +231,11 @@ jobs:
             artefact_dir: hello
             pytest_filter: test_hello_uart.py
             env_var: FSW_CORE_HELLO_ELF
-          - name: pus17
-            artefact: fsw-core-pus17-nucleo_h753zi
-            artefact_dir: pus17
-            pytest_filter: test_pus17_uart.py
-            env_var: FSW_CORE_PUS17_ELF
+          - name: tc
+            artefact: fsw-core-tc-nucleo_h753zi
+            artefact_dir: tc
+            pytest_filter: test_tc_uart.py
+            env_var: FSW_CORE_TC_ELF
     env:
       RENODE_VERSION: "1.16.1"
     steps:

@@ -79,6 +79,33 @@ PUS_SERVICE_TEST = 17
 PUS_17_SUBTYPE_ARE_YOU_ALIVE_TC = 1
 PUS_17_SUBTYPE_ARE_YOU_ALIVE_TM = 2
 
+PUS_SERVICE_VERIFICATION = 1
+PUS_1_SUBTYPE_ACCEPTANCE_SUCCESS = 1
+PUS_1_SUBTYPE_ACCEPTANCE_FAILURE = 2
+PUS_1_SUBTYPE_COMPLETION_SUCCESS = 7
+PUS_1_SUBTYPE_COMPLETION_FAILURE = 8
+
+# PUS-C TC ack-flag bit masks (pus_tc.h / docs/wire/pus-17.md).
+ACK_ACCEPTANCE = 0x1
+ACK_START = 0x2
+ACK_PROGRESS = 0x4
+ACK_COMPLETION = 0x8
+
+# PUS-1 source-data sizes and failure codes (docs/wire/pus-1.md).
+PUS1_REQUEST_ID_SIZE = 4
+PUS1_SUCCESS_TM_PACKET_SIZE = 22
+PUS1_FAILURE_TM_PACKET_SIZE = 23
+
+FC_NONE = 0
+FC_BAD_PRIMARY = 1
+FC_ILLEGAL_APID = 2
+FC_LENGTH_ERROR = 3
+FC_CRC_FAILURE = 4
+FC_BAD_PUS_VERSION = 5
+FC_UNKNOWN_SERVICE = 6
+FC_UNKNOWN_SUBTYPE = 7
+FC_EXEC_FAILURE = 8
+
 
 @dataclass
 class PusTcSecondary:
@@ -154,59 +181,119 @@ def crc16_ccitt_false(data: bytes) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Convenience builders for the slice fsw-4 wire.
+# Convenience builders / decoders for the on-board TC/TM wire.
 # ---------------------------------------------------------------------------
 
 PUS17_TC_PACKET_SIZE = 13
 PUS17_TM_PACKET_SIZE = 18
 
 # Pinned by docs/wire/pus-17.md.
-FSW4_APID = 0x100
+FSW_APID = 0x100
 
 
-def build_pus17_are_you_alive_tc(
+def build_tc(
     *,
-    apid: int = FSW4_APID,
+    service_type: int,
+    service_subtype: int,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
     seq_count: int = 0,
     source_id: int = 0,
+    data_length: int | None = None,
 ) -> bytes:
-    """Encode a complete PUS-17[1] TC packet (13 bytes, CRC included)."""
+    """Encode a complete PUS-C TC packet (CRC included). ``data_length``
+    overrides the (correct) CCSDS Packet Data Length so length-error
+    paths can be exercised."""
     primary = CcsdsPrimary(
         type=PACKET_TYPE_TC,
         sec_hdr_flag=1,
         apid=apid,
         seq_count=seq_count,
-        data_length=PUS_TC_SECONDARY_HEADER_SIZE + 2 - 1,
+        data_length=(PUS_TC_SECONDARY_HEADER_SIZE + 2 - 1)
+        if data_length is None
+        else data_length,
     )
     tc_sec = PusTcSecondary(
-        service_type=PUS_SERVICE_TEST,
-        service_subtype=PUS_17_SUBTYPE_ARE_YOU_ALIVE_TC,
+        ack_flags=ack_flags,
+        service_type=service_type,
+        service_subtype=service_subtype,
         source_id=source_id,
     )
     body = primary.pack() + tc_sec.pack()
     return body + struct.pack(">H", crc16_ccitt_false(body))
 
 
+def build_pus17_are_you_alive_tc(
+    *,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-17[1] TC packet (13 bytes, CRC included)."""
+    return build_tc(
+        service_type=PUS_SERVICE_TEST,
+        service_subtype=PUS_17_SUBTYPE_ARE_YOU_ALIVE_TC,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+    )
+
+
+def split_packets(stream: bytes) -> list[bytes]:
+    """Walk a back-to-back TM byte stream into individual CCSDS Space
+    Packets using each primary header's Packet Data Length. Trailing
+    bytes that cannot form a full packet are ignored (the caller
+    asserts on the count)."""
+    out: list[bytes] = []
+    pos = 0
+    while pos + CCSDS_PRIMARY_HEADER_SIZE <= len(stream):
+        p = CcsdsPrimary.unpack(stream[pos : pos + CCSDS_PRIMARY_HEADER_SIZE])
+        size = CCSDS_PRIMARY_HEADER_SIZE + p.data_length + 1
+        if pos + size > len(stream):
+            break
+        out.append(stream[pos : pos + size])
+        pos += size
+    return out
+
+
 @dataclass
-class Pus17Tm:
+class DecodedTm:
+    """A decoded TM Space Packet. Works for any service: PUS-17[2]
+    has empty source data; PUS-1 reports carry a 4-byte request ID
+    (plus a failure-code byte on the failure subtypes)."""
+
     primary: CcsdsPrimary
     secondary: PusTmSecondary
+    source_data: bytes
     crc_ok: bool
 
     @classmethod
-    def decode(cls, packet: bytes) -> "Pus17Tm":
-        if len(packet) != PUS17_TM_PACKET_SIZE:
-            raise ValueError(
-                f"PUS-17[2] TM packet must be {PUS17_TM_PACKET_SIZE} bytes, "
-                f"got {len(packet)}"
-            )
+    def decode(cls, packet: bytes) -> "DecodedTm":
+        if len(packet) < CCSDS_PRIMARY_HEADER_SIZE + PUS_TM_SECONDARY_HEADER_SIZE + 2:
+            raise ValueError(f"TM packet too short: {len(packet)} bytes")
         primary = CcsdsPrimary.unpack(packet[:CCSDS_PRIMARY_HEADER_SIZE])
-        secondary = PusTmSecondary.unpack(
-            packet[
-                CCSDS_PRIMARY_HEADER_SIZE : CCSDS_PRIMARY_HEADER_SIZE
-                + PUS_TM_SECONDARY_HEADER_SIZE
-            ]
-        )
+        sec_end = CCSDS_PRIMARY_HEADER_SIZE + PUS_TM_SECONDARY_HEADER_SIZE
+        secondary = PusTmSecondary.unpack(packet[CCSDS_PRIMARY_HEADER_SIZE:sec_end])
+        source_data = packet[sec_end:-2]
         on_wire = struct.unpack(">H", packet[-2:])[0]
         computed = crc16_ccitt_false(packet[:-2])
-        return cls(primary=primary, secondary=secondary, crc_ok=(on_wire == computed))
+        return cls(
+            primary=primary,
+            secondary=secondary,
+            source_data=source_data,
+            crc_ok=(on_wire == computed),
+        )
+
+    @property
+    def request_id(self) -> bytes:
+        """The 4-byte PUS-1 request ID (empty for non-PUS-1 TM)."""
+        return self.source_data[:PUS1_REQUEST_ID_SIZE]
+
+    @property
+    def failure_code(self) -> int | None:
+        """The PUS-1 failure code, or ``None`` for success / non-PUS-1."""
+        if len(self.source_data) > PUS1_REQUEST_ID_SIZE:
+            return self.source_data[PUS1_REQUEST_ID_SIZE]
+        return None

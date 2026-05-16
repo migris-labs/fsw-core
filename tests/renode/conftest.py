@@ -9,9 +9,9 @@ Provides:
     test modules' ``pytestmark`` skipifs so the suite degrades to a
     clean skip when run on a machine that has neither Renode nor the
     cross-compiled hello-world ELF.
-  * ``hello_running`` fixture — spawns Renode, runs the parametrised
-    ``.resc``, attaches a ``UartCapture`` to USART3, starts the CPU,
-    yields ``(monitor, uart)``.
+  * ``hello_running`` / ``tc_running`` fixtures — spawn Renode, run
+    the parametrised ``.resc``, attach a ``UartCapture`` to USART3,
+    start the CPU, yield ``(monitor, uart)``.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from _renode_driver import (
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 RESC_PATH = HERE / "scripts" / "hello_nucleo_h753zi.resc"
-PUS17_RESC_PATH = HERE / "scripts" / "pus17_nucleo_h753zi.resc"
+TC_RESC_PATH = HERE / "scripts" / "tc_nucleo_h753zi.resc"
 
 
 def _find_elf(env_var: str, artefact_subdir: str, west_build_dir: str) -> Path | None:
@@ -72,7 +72,7 @@ def _find_elf(env_var: str, artefact_subdir: str, west_build_dir: str) -> Path |
 
 _RENODE_BIN = find_renode_binary()
 _HELLO_ELF = _find_elf("FSW_CORE_HELLO_ELF", "hello", "zephyr-hello")
-_PUS17_ELF = _find_elf("FSW_CORE_PUS17_ELF", "pus17", "zephyr-pus17")
+_TC_ELF = _find_elf("FSW_CORE_TC_ELF", "tc", "zephyr-tc")
 
 
 def _boot(
@@ -106,9 +106,9 @@ def hello_running() -> Iterator[tuple[RenodeMonitor, UartCapture]]:
 
 
 @pytest.fixture
-def pus17_running() -> Iterator[tuple[RenodeMonitor, UartCapture]]:
-    """Boot the PUS-17 UART sample ELF in Renode with a TCP UART
+def tc_running() -> Iterator[tuple[RenodeMonitor, UartCapture]]:
+    """Boot the TC-router UART sample ELF in Renode with a TCP UART
     terminal attached. Yields ``(monitor, uart_capture)``."""
     assert _RENODE_BIN is not None
-    assert _PUS17_ELF is not None
-    yield from _boot(_PUS17_ELF, PUS17_RESC_PATH)
+    assert _TC_ELF is not None
+    yield from _boot(_TC_ELF, TC_RESC_PATH)

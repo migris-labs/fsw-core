@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-5: PUS-1 TC verification (acceptance + completion).**
+  New freestanding C TC reception / acceptance / routing layer
+  (`lib/pus/tc_router.{h,c}`) — the framework's first on-board
+  dispatcher — plus a PUS-1 verification-report encoder
+  (`lib/pus/pus1.{h,c}`). A received TC is validated (CCSDS primary,
+  length, CRC, PUS-C version, routable service) and, gated by its
+  ack-flag bits, the FSW emits PUS-1[1]/[2] acceptance and
+  PUS-1[7]/[8] completion reports around the routed service response,
+  all back-to-back on the existing UART. Reports carry the verified
+  TC's 4-byte request ID (and a 1-byte failure code on failures).
+  PUS-1 start ([3]/[4]) and progress ([5]/[6]) are deferred until a
+  long-running command exists to exercise them (workspace
+  `CLAUDE.md`). New host unit suites `tests/pus1_test.cpp` and
+  `tests/tc_router_test.cpp`; `tests/renode/test_tc_uart.py` drives
+  the full PUS-1 + PUS-17 round-trip on the emulated `nucleo_h753zi`.
+  Wire format pinned in [`docs/wire/pus-1.md`](docs/wire/pus-1.md).
+
+### Changed
+- **TM sequence count is now shared per-APID.** It moved out of the
+  per-service context into the new TC router context, so PUS-1 and
+  PUS-17 packets emitted for one TC share a single, strictly
+  monotonic CCSDS sequence space (CCSDS 133.0-B-2: one count per APID
+  per direction). `migris_pus17_handle_are_you_alive` is replaced by
+  `migris_pus17_execute` (generic TC validation moved to the router).
+  **The bytes on the wire are unchanged** — this is a C-API reshape,
+  not a wire-breaking change.
+- **`samples/pus17_uart` renamed to `samples/tc_uart`** (it is now a
+  generic TC-reception + verification demonstrator, not PUS-17-only).
+  The `zephyr-build` / `renode-smoke` CI matrix entries, the Renode
+  `.resc` script, the `tc_running` fixture, and the
+  `FSW_CORE_TC_ELF` override env var are renamed to match.
+
 - **Slice fsw-4: PUS-17 connection test over UART.** New freestanding
   C codec under `lib/pus/` (CCSDS Space Packet primary header
   pack/unpack, CRC-16-CCITT-FALSE, PUS-C TC/TM secondary headers,

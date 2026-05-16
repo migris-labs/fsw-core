@@ -1,0 +1,17 @@
+sample:
+  name: fsw-core TC reception + verification
+  description: >-
+    Zephyr application that listens on USART3 for a CCSDS Space
+    Packet, runs it through the TC router (PUS-1 verification +
+    PUS-17 service routing), and writes the resulting TM stream
+    back on the same UART. Used by the Renode round-trip smoke
+    test in tests/renode/.
+tests:
+  sample.fsw-core.tc_uart:
+    platform_allow: nucleo_h753zi
+    tags: pus uart
+    # The sample only emits when a TC arrives — there is no
+    # spontaneous output to harness on. Twister discovery lives
+    # here so the build is exercised; behavioural coverage is
+    # provided by tests/renode/test_tc_uart.py.
+    harness: none
