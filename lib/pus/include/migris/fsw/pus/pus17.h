@@ -51,12 +51,12 @@ typedef struct {
 /** PUS-17 handler return / error codes. */
 typedef enum {
     MIGRIS_PUS17_OK = 0,
-    MIGRIS_PUS17_ERR_TRUNCATED = -1,         /**< TC shorter than declared. */
-    MIGRIS_PUS17_ERR_BAD_PRIMARY = -2,       /**< Type, APID, or sec-hdr flag mismatch. */
-    MIGRIS_PUS17_ERR_BAD_CRC = -3,           /**< CRC verification failed on the TC. */
-    MIGRIS_PUS17_ERR_NOT_PUS17_TC = -4,      /**< Service/subtype is not (17, 1). */
-    MIGRIS_PUS17_ERR_BAD_PUS_VERSION = -5,   /**< TC secondary header PUS version not C. */
-    MIGRIS_PUS17_ERR_BUF_TOO_SMALL = -6      /**< Output buffer < MIGRIS_PUS17_TM_PACKET_SIZE. */
+    MIGRIS_PUS17_ERR_TRUNCATED = -1,       /**< TC shorter than declared. */
+    MIGRIS_PUS17_ERR_BAD_PRIMARY = -2,     /**< Type, APID, or sec-hdr flag mismatch. */
+    MIGRIS_PUS17_ERR_BAD_CRC = -3,         /**< CRC verification failed on the TC. */
+    MIGRIS_PUS17_ERR_NOT_PUS17_TC = -4,    /**< Service/subtype is not (17, 1). */
+    MIGRIS_PUS17_ERR_BAD_PUS_VERSION = -5, /**< TC secondary header PUS version not C. */
+    MIGRIS_PUS17_ERR_BUF_TOO_SMALL = -6    /**< Output buffer < MIGRIS_PUS17_TM_PACKET_SIZE. */
 } migris_pus17_status_t;
 
 /** Decode a PUS-17[1] TC from ``tc`` (``tc_len`` bytes), validate its
@@ -70,10 +70,12 @@ typedef enum {
  *  Side effects: bumps ``ctx->tm_seq_count`` and ``ctx->tm_msg_counter``
  *  on success only. A failed TC validation leaves the context state
  *  unchanged so the next valid TC produces consecutively-numbered TM. */
-int migris_pus17_handle_are_you_alive(migris_pus17_ctx_t *ctx,
+int migris_pus17_handle_are_you_alive(migris_pus17_ctx_t* ctx,
                                       uint32_t now_seconds,
-                                      const uint8_t *tc, size_t tc_len,
-                                      uint8_t *tm, size_t tm_cap);
+                                      const uint8_t* tc,
+                                      size_t tc_len,
+                                      uint8_t* tm,
+                                      size_t tm_cap);
 
 #ifdef __cplusplus
 }  // extern "C"

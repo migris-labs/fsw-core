@@ -28,20 +28,22 @@ extern "C" {
 #define MIGRIS_PUS_TM_SECONDARY_HEADER_SIZE 10U
 
 typedef struct {
-    uint8_t pus_version;         /**< 4 bits, ``2`` (PUS-C). */
-    uint8_t sc_time_ref_status;  /**< 4 bits, ``0`` while time correlation is undefined. */
-    uint8_t service_type;        /**< 8 bits. */
-    uint8_t service_subtype;     /**< 8 bits. */
-    uint8_t msg_counter;         /**< 8 bits, monotonic per service+subtype. */
-    uint16_t destination_id;     /**< 16 bits, echoes the source ID of the triggering TC. */
-    uint32_t time_seconds;       /**< 32 bits, CUC coarse seconds, big-endian on the wire. */
+    uint8_t pus_version;        /**< 4 bits, ``2`` (PUS-C). */
+    uint8_t sc_time_ref_status; /**< 4 bits, ``0`` while time correlation is undefined. */
+    uint8_t service_type;       /**< 8 bits. */
+    uint8_t service_subtype;    /**< 8 bits. */
+    uint8_t msg_counter;        /**< 8 bits, monotonic per service+subtype. */
+    uint16_t destination_id;    /**< 16 bits, echoes the source ID of the triggering TC. */
+    uint32_t time_seconds;      /**< 32 bits, CUC coarse seconds, big-endian on the wire. */
 } migris_pus_tm_secondary_header_t;
 
-int migris_pus_tm_secondary_pack(const migris_pus_tm_secondary_header_t *hdr,
-                                 uint8_t *out, size_t out_len);
+int migris_pus_tm_secondary_pack(const migris_pus_tm_secondary_header_t* hdr,
+                                 uint8_t* out,
+                                 size_t out_len);
 
-int migris_pus_tm_secondary_unpack(migris_pus_tm_secondary_header_t *hdr,
-                                   const uint8_t *in, size_t in_len);
+int migris_pus_tm_secondary_unpack(migris_pus_tm_secondary_header_t* hdr,
+                                   const uint8_t* in,
+                                   size_t in_len);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -32,20 +32,20 @@
  * not on the Space Packet layer.
  */
 
+#include "migris/fsw/pus/ccsds.h"
+#include "migris/fsw/pus/pus17.h"
+
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/ring_buffer.h>
-
-#include "migris/fsw/pus/ccsds.h"
-#include "migris/fsw/pus/pus17.h"
 
 /* USART3 is the platform-pinned UART for fsw-4 (same as fsw-3's
  * hello sample). The board's ``zephyr,console`` choice points there
  * by default; we leave that alone — boot banner / printk / log are
  * all disabled in prj.conf so nothing else writes to it. */
 #define UART_NODE DT_NODELABEL(usart3)
-static const struct device *const uart_dev = DEVICE_DT_GET(UART_NODE);
+static const struct device* const uart_dev = DEVICE_DT_GET(UART_NODE);
 
 /* APID 0x100 — see docs/wire/pus-17.md. The sample app is its own
  * application process; downstream missions will allocate their own. */
@@ -57,8 +57,7 @@ static const struct device *const uart_dev = DEVICE_DT_GET(UART_NODE);
 #define RX_RING_SIZE 128
 RING_BUF_DECLARE(rx_ring, RX_RING_SIZE);
 
-static void uart_isr(const struct device *dev, void *user_data)
-{
+static void uart_isr(const struct device* dev, void* user_data) {
     ARG_UNUSED(user_data);
 
     if (!uart_irq_update(dev)) {
@@ -78,8 +77,7 @@ static void uart_isr(const struct device *dev, void *user_data)
     }
 }
 
-static void uart_tx_blocking(const struct device *dev, const uint8_t *buf, size_t len)
-{
+static void uart_tx_blocking(const struct device* dev, const uint8_t* buf, size_t len) {
     for (size_t i = 0; i < len; ++i) {
         uart_poll_out(dev, buf[i]);
     }
@@ -127,8 +125,7 @@ int main(void) {
          * sync or talking to something we don't understand —
          * either way, reset and re-listen from byte 0. */
         if (have == MIGRIS_CCSDS_PRIMARY_HEADER_SIZE) {
-            const uint16_t data_length =
-                (uint16_t)(((uint16_t)tc[4] << 8) | (uint16_t)tc[5]);
+            const uint16_t data_length = (uint16_t)(((uint16_t)tc[4] << 8) | (uint16_t)tc[5]);
             const size_t total = migris_ccsds_packet_total_size(data_length);
             if (total != MIGRIS_PUS17_TC_PACKET_SIZE) {
                 have = 0U;
@@ -138,8 +135,8 @@ int main(void) {
 
         if (have == MIGRIS_PUS17_TC_PACKET_SIZE) {
             const uint32_t now_sec = (uint32_t)(k_uptime_get() / 1000);
-            const int rc = migris_pus17_handle_are_you_alive(
-                &ctx, now_sec, tc, have, tm, sizeof(tm));
+            const int rc =
+                migris_pus17_handle_are_you_alive(&ctx, now_sec, tc, have, tm, sizeof(tm));
             if (rc > 0) {
                 uart_tx_blocking(uart_dev, tm, (size_t)rc);
             }

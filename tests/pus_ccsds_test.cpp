@@ -14,8 +14,7 @@ namespace {
 TEST(Crc16CcittFalse, KnownVector123456789) {
     // Canonical CRC-16/CCITT-FALSE check vector (Catalogue of CRC
     // Routines): "123456789" -> 0x29B1.
-    const std::array<std::uint8_t, 9> input = {'1', '2', '3', '4', '5',
-                                               '6', '7', '8', '9'};
+    const std::array<std::uint8_t, 9> input = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
     EXPECT_EQ(migris_crc16_ccitt_false(input.data(), input.size()), 0x29B1U);
 }
 
@@ -37,8 +36,7 @@ TEST(CcsdsPrimary, RoundTripsTcAtApid0x100SeqCount0) {
     };
 
     std::array<std::uint8_t, MIGRIS_CCSDS_PRIMARY_HEADER_SIZE> buf{};
-    ASSERT_EQ(migris_ccsds_primary_pack(&in, buf.data(), buf.size()),
-              MIGRIS_CCSDS_OK);
+    ASSERT_EQ(migris_ccsds_primary_pack(&in, buf.data(), buf.size()), MIGRIS_CCSDS_OK);
 
     // Byte-exact verification — the wire-format spec is the contract.
     EXPECT_EQ(buf[0], 0x19U);
@@ -49,8 +47,7 @@ TEST(CcsdsPrimary, RoundTripsTcAtApid0x100SeqCount0) {
     EXPECT_EQ(buf[5], 0x06U);
 
     migris_ccsds_primary_header_t out{};
-    ASSERT_EQ(migris_ccsds_primary_unpack(&out, buf.data(), buf.size()),
-              MIGRIS_CCSDS_OK);
+    ASSERT_EQ(migris_ccsds_primary_unpack(&out, buf.data(), buf.size()), MIGRIS_CCSDS_OK);
     EXPECT_EQ(out.version, in.version);
     EXPECT_EQ(out.type, in.type);
     EXPECT_EQ(out.sec_hdr_flag, in.sec_hdr_flag);
@@ -72,8 +69,7 @@ TEST(CcsdsPrimary, RoundTripsTmAtApid0x100SeqCount0) {
     };
 
     std::array<std::uint8_t, MIGRIS_CCSDS_PRIMARY_HEADER_SIZE> buf{};
-    ASSERT_EQ(migris_ccsds_primary_pack(&in, buf.data(), buf.size()),
-              MIGRIS_CCSDS_OK);
+    ASSERT_EQ(migris_ccsds_primary_pack(&in, buf.data(), buf.size()), MIGRIS_CCSDS_OK);
 
     EXPECT_EQ(buf[0], 0x09U);
     EXPECT_EQ(buf[1], 0x00U);
@@ -94,12 +90,10 @@ TEST(CcsdsPrimary, RoundTripsMaxFieldValues) {
         /*data_length=*/0xFFFF,
     };
     std::array<std::uint8_t, MIGRIS_CCSDS_PRIMARY_HEADER_SIZE> buf{};
-    ASSERT_EQ(migris_ccsds_primary_pack(&in, buf.data(), buf.size()),
-              MIGRIS_CCSDS_OK);
+    ASSERT_EQ(migris_ccsds_primary_pack(&in, buf.data(), buf.size()), MIGRIS_CCSDS_OK);
 
     migris_ccsds_primary_header_t out{};
-    ASSERT_EQ(migris_ccsds_primary_unpack(&out, buf.data(), buf.size()),
-              MIGRIS_CCSDS_OK);
+    ASSERT_EQ(migris_ccsds_primary_unpack(&out, buf.data(), buf.size()), MIGRIS_CCSDS_OK);
     EXPECT_EQ(out.version, 7U);
     EXPECT_EQ(out.type, 1U);
     EXPECT_EQ(out.sec_hdr_flag, 1U);

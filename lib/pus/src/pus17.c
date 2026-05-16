@@ -15,14 +15,14 @@
 
 #include "migris/fsw/pus/pus17.h"
 
-#include <stddef.h>
-#include <stdint.h>
-
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus_tc.h"
 #include "migris/fsw/pus/pus_tm.h"
 
-static int validate_primary(const migris_ccsds_primary_header_t *hdr, uint16_t expected_apid) {
+#include <stddef.h>
+#include <stdint.h>
+
+static int validate_primary(const migris_ccsds_primary_header_t* hdr, uint16_t expected_apid) {
     if (hdr->version != 0U) {
         return MIGRIS_PUS17_ERR_BAD_PRIMARY;
     }
@@ -41,10 +41,12 @@ static int validate_primary(const migris_ccsds_primary_header_t *hdr, uint16_t e
     return MIGRIS_PUS17_OK;
 }
 
-int migris_pus17_handle_are_you_alive(migris_pus17_ctx_t *ctx,
+int migris_pus17_handle_are_you_alive(migris_pus17_ctx_t* ctx,
                                       uint32_t now_seconds,
-                                      const uint8_t *tc, size_t tc_len,
-                                      uint8_t *tm, size_t tm_cap) {
+                                      const uint8_t* tc,
+                                      size_t tc_len,
+                                      uint8_t* tm,
+                                      size_t tm_cap) {
     if (tm_cap < MIGRIS_PUS17_TM_PACKET_SIZE) {
         return MIGRIS_PUS17_ERR_BUF_TOO_SMALL;
     }
@@ -76,8 +78,8 @@ int migris_pus17_handle_are_you_alive(migris_pus17_ctx_t *ctx,
     /* CRC check covers every byte before the trailing 2-byte CRC. */
     const size_t crc_offset = tc_len - 2U;
     const uint16_t computed = migris_crc16_ccitt_false(tc, crc_offset);
-    const uint16_t on_wire = (uint16_t)(((uint16_t)tc[crc_offset] << 8)
-                                        | (uint16_t)tc[crc_offset + 1U]);
+    const uint16_t on_wire =
+        (uint16_t)(((uint16_t)tc[crc_offset] << 8) | (uint16_t)tc[crc_offset + 1U]);
     if (computed != on_wire) {
         return MIGRIS_PUS17_ERR_BAD_CRC;
     }
@@ -86,15 +88,14 @@ int migris_pus17_handle_are_you_alive(migris_pus17_ctx_t *ctx,
     migris_pus_tc_secondary_header_t tc_sec;
     if (migris_pus_tc_secondary_unpack(&tc_sec,
                                        &tc[MIGRIS_CCSDS_PRIMARY_HEADER_SIZE],
-                                       tc_len - MIGRIS_CCSDS_PRIMARY_HEADER_SIZE)
-        != 0) {
+                                       tc_len - MIGRIS_CCSDS_PRIMARY_HEADER_SIZE) != 0) {
         return MIGRIS_PUS17_ERR_TRUNCATED;
     }
     if (tc_sec.pus_version != MIGRIS_PUS_VERSION_C) {
         return MIGRIS_PUS17_ERR_BAD_PUS_VERSION;
     }
-    if (tc_sec.service_type != MIGRIS_PUS_SERVICE_TEST
-        || tc_sec.service_subtype != MIGRIS_PUS17_SUBTYPE_ARE_YOU_ALIVE_TC) {
+    if (tc_sec.service_type != MIGRIS_PUS_SERVICE_TEST ||
+        tc_sec.service_subtype != MIGRIS_PUS17_SUBTYPE_ARE_YOU_ALIVE_TC) {
         return MIGRIS_PUS17_ERR_NOT_PUS17_TC;
     }
 
@@ -124,9 +125,8 @@ int migris_pus17_handle_are_you_alive(migris_pus17_ctx_t *ctx,
         .time_seconds = now_seconds,
     };
 
-    rc = migris_pus_tm_secondary_pack(&tm_sec,
-                                      &tm[MIGRIS_CCSDS_PRIMARY_HEADER_SIZE],
-                                      tm_cap - MIGRIS_CCSDS_PRIMARY_HEADER_SIZE);
+    rc = migris_pus_tm_secondary_pack(
+        &tm_sec, &tm[MIGRIS_CCSDS_PRIMARY_HEADER_SIZE], tm_cap - MIGRIS_CCSDS_PRIMARY_HEADER_SIZE);
     if (rc != 0) {
         return MIGRIS_PUS17_ERR_BUF_TOO_SMALL;
     }

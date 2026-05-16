@@ -30,8 +30,8 @@ extern "C" {
  *  corresponding PUS-1 verification report. Slice fsw-4 leaves
  *  these unset (PUS-1 service not yet implemented). */
 #define MIGRIS_PUS_TC_ACK_ACCEPTANCE 0x01U
-#define MIGRIS_PUS_TC_ACK_START      0x02U
-#define MIGRIS_PUS_TC_ACK_PROGRESS   0x04U
+#define MIGRIS_PUS_TC_ACK_START 0x02U
+#define MIGRIS_PUS_TC_ACK_PROGRESS 0x04U
 #define MIGRIS_PUS_TC_ACK_COMPLETION 0x08U
 
 typedef struct {
@@ -42,11 +42,13 @@ typedef struct {
     uint16_t source_id;      /**< 16 bits, operator-assigned. */
 } migris_pus_tc_secondary_header_t;
 
-int migris_pus_tc_secondary_pack(const migris_pus_tc_secondary_header_t *hdr,
-                                 uint8_t *out, size_t out_len);
+int migris_pus_tc_secondary_pack(const migris_pus_tc_secondary_header_t* hdr,
+                                 uint8_t* out,
+                                 size_t out_len);
 
-int migris_pus_tc_secondary_unpack(migris_pus_tc_secondary_header_t *hdr,
-                                   const uint8_t *in, size_t in_len);
+int migris_pus_tc_secondary_unpack(migris_pus_tc_secondary_header_t* hdr,
+                                   const uint8_t* in,
+                                   size_t in_len);
 
 #ifdef __cplusplus
 }  // extern "C"

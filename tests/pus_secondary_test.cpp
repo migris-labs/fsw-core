@@ -41,8 +41,8 @@ TEST(PusTcSecondary, RoundTripsPus17_1) {
 TEST(PusTcSecondary, EncodesAllAckFlagsSet) {
     const migris_pus_tc_secondary_header_t in = {
         /*pus_version=*/MIGRIS_PUS_VERSION_C,
-        /*ack_flags=*/MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_START
-                          | MIGRIS_PUS_TC_ACK_PROGRESS | MIGRIS_PUS_TC_ACK_COMPLETION,
+        /*ack_flags=*/MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_START |
+            MIGRIS_PUS_TC_ACK_PROGRESS | MIGRIS_PUS_TC_ACK_COMPLETION,
         /*service_type=*/17,
         /*service_subtype=*/1,
         /*source_id=*/0xCAFE,
@@ -100,7 +100,13 @@ TEST(PusTmSecondary, RoundTripsPus17_2) {
 
 TEST(PusTmSecondary, RejectsTooShortBuffer) {
     const migris_pus_tm_secondary_header_t in = {
-        MIGRIS_PUS_VERSION_C, 0, 17, 2, 0, 0, 0,
+        MIGRIS_PUS_VERSION_C,
+        0,
+        17,
+        2,
+        0,
+        0,
+        0,
     };
     std::array<std::uint8_t, MIGRIS_PUS_TM_SECONDARY_HEADER_SIZE - 1> buf{};
     EXPECT_LT(migris_pus_tm_secondary_pack(&in, buf.data(), buf.size()), 0);

@@ -43,13 +43,13 @@ extern "C" {
  *  numeric values of the bit-fields on the wire (not raw bit
  *  patterns) — i.e. ``type == 1`` means TC, not ``type == 0x10``. */
 typedef struct {
-    uint8_t version;       /**< 3 bits, ``0`` for every packet we emit. */
-    uint8_t type;          /**< 1 bit, ``0``=TM, ``1``=TC. */
-    uint8_t sec_hdr_flag;  /**< 1 bit, ``1`` for PUS packets. */
-    uint16_t apid;         /**< 11 bits. */
-    uint8_t seq_flags;     /**< 2 bits, ``3`` (UNSEGMENTED) for our packets. */
-    uint16_t seq_count;    /**< 14 bits, per-direction monotonic count. */
-    uint16_t data_length;  /**< 16 bits, ``(bytes in data field) − 1``. */
+    uint8_t version;      /**< 3 bits, ``0`` for every packet we emit. */
+    uint8_t type;         /**< 1 bit, ``0``=TM, ``1``=TC. */
+    uint8_t sec_hdr_flag; /**< 1 bit, ``1`` for PUS packets. */
+    uint16_t apid;        /**< 11 bits. */
+    uint8_t seq_flags;    /**< 2 bits, ``3`` (UNSEGMENTED) for our packets. */
+    uint16_t seq_count;   /**< 14 bits, per-direction monotonic count. */
+    uint16_t data_length; /**< 16 bits, ``(bytes in data field) − 1``. */
 } migris_ccsds_primary_header_t;
 
 /** Error codes returned by the codec functions in this header and the
@@ -66,16 +66,18 @@ typedef enum {
  *  Returns 0 on success, a negative ``migris_ccsds_status_t`` on
  *  failure. Fails fast if any field is out of range — the caller is
  *  responsible for keeping ``apid`` < 2^11, ``seq_count`` < 2^14, etc. */
-int migris_ccsds_primary_pack(const migris_ccsds_primary_header_t *hdr,
-                              uint8_t *out, size_t out_len);
+int migris_ccsds_primary_pack(const migris_ccsds_primary_header_t* hdr,
+                              uint8_t* out,
+                              size_t out_len);
 
 /** Decode the first ``MIGRIS_CCSDS_PRIMARY_HEADER_SIZE`` bytes of
  *  ``in`` into ``hdr``. ``in_len`` is the size of the input buffer.
  *  Returns 0 on success, a negative ``migris_ccsds_status_t`` on
  *  failure. Does not validate semantics (caller checks APID match,
  *  packet type, etc.). */
-int migris_ccsds_primary_unpack(migris_ccsds_primary_header_t *hdr,
-                                const uint8_t *in, size_t in_len);
+int migris_ccsds_primary_unpack(migris_ccsds_primary_header_t* hdr,
+                                const uint8_t* in,
+                                size_t in_len);
 
 /** Total CCSDS Space Packet length implied by ``data_length``: the
  *  6-byte primary header plus ``data_length + 1`` bytes of data
@@ -104,7 +106,7 @@ static inline size_t migris_ccsds_packet_total_size(uint16_t data_length) {
  *  trivial for typical PUS packet sizes (<100 bytes) and avoids the
  *  512-byte lookup table's ROM cost. Revisit if a hot path arrives.
  */
-uint16_t migris_crc16_ccitt_false(const uint8_t *buf, size_t len);
+uint16_t migris_crc16_ccitt_false(const uint8_t* buf, size_t len);
 
 #ifdef __cplusplus
 }  // extern "C"
