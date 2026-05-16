@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-6: PUS-5 event reporting.** New freestanding C
+  event-report encoder (`lib/pus/pus5.{h,c}`) for the four severity
+  subtypes — informative [1], low [2], medium [3], high [4] anomaly —
+  carrying a 2-byte big-endian event-definition ID plus optional
+  auxiliary data (≤ 32 bytes). This is the framework's first
+  *asynchronous* TM service: a report is emitted spontaneously at the
+  point a condition is detected, not as a side effect of an inbound
+  TC. The `tc_uart` sample emits one PUS-5[1] `FSW_BOOT` informative
+  event on reset — the first TM it produces — threading the router's
+  shared per-APID CCSDS sequence count so the boot event consumes
+  count 0 and the per-APID sequence stays strictly monotonic across it
+  and every subsequent verification / service packet. New host suite
+  `tests/pus5_test.cpp`; `tests/renode/test_tc_uart.py` asserts the
+  boot event end-to-end and its four pre-existing tests are rebased
+  past the leading boot packet (+1 shared sequence count) — an
+  intended consequence of the sample now emitting boot TM, not a
+  regression. Wire format pinned in
+  [`docs/wire/pus-5.md`](docs/wire/pus-5.md). Scoped decisions:
+  - The control subtypes [5]/[6] (enable/disable event generation),
+    [7] and [8] are **deliberately excluded** — TC-driven event
+    reconfiguration overlaps PUS-20 (onboard parameter management,
+    P1) and has no driving use case yet.
+  - Event-definition IDs `0x0001`–`0x00FF` are reserved for fsw-core
+    *framework* events; `0x0100`+ is mission-owned (scheme pinned
+    when `cry4-fsw` bootstraps), mirroring the pinned "PUS-128+
+    vendor assignments live downstream" decision.
+  - **No event queue.** PUS-5 stays a pure stateless encoder (the
+    proven pus1/pus17 shape). A freestanding bounded event FIFO is
+    the explicit *next* abstraction, earned when a producer that does
+    not own a TM output buffer first exists (an FDIR monitor, PUS-3
+    housekeeping, or the ISR-context UART RX-ring overflow event).
+  - **Router-side anomaly emission on TC rejection is deferred** to
+    the FDIR slice (its first real consumer); the TC router is
+    untouched, so all fsw-5 host suites stay green unchanged and the
+    pinned `docs/wire/pus-1.md` rule-3 "no-ack ⇒ silence" invariant
+    is preserved.
 - **Slice fsw-5: PUS-1 TC verification (acceptance + completion).**
   New freestanding C TC reception / acceptance / routing layer
   (`lib/pus/tc_router.{h,c}`) — the framework's first on-board

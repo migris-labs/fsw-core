@@ -106,6 +106,20 @@ FC_UNKNOWN_SERVICE = 6
 FC_UNKNOWN_SUBTYPE = 7
 FC_EXEC_FAILURE = 8
 
+# PUS-5 event reporting (docs/wire/pus-5.md).
+PUS_SERVICE_EVENT_REPORTING = 5
+PUS_5_SUBTYPE_INFO = 1
+PUS_5_SUBTYPE_LOW = 2
+PUS_5_SUBTYPE_MEDIUM = 3
+PUS_5_SUBTYPE_HIGH = 4
+
+PUS5_EVENT_ID_SIZE = 2
+# Bare event (no auxiliary data): primary 6 + TM sec 10 + event ID 2 + CRC 2.
+PUS5_BARE_TM_PACKET_SIZE = 20
+
+# fsw-core framework event-definition IDs (reserved block 0x0001..0x00FF).
+PUS5_EVT_FSW_BOOT = 0x0001
+
 
 @dataclass
 class PusTcSecondary:
@@ -262,7 +276,8 @@ def split_packets(stream: bytes) -> list[bytes]:
 class DecodedTm:
     """A decoded TM Space Packet. Works for any service: PUS-17[2]
     has empty source data; PUS-1 reports carry a 4-byte request ID
-    (plus a failure-code byte on the failure subtypes)."""
+    (plus a failure-code byte on the failure subtypes); PUS-5 event
+    reports carry a 2-byte event ID plus optional auxiliary data."""
 
     primary: CcsdsPrimary
     secondary: PusTmSecondary
@@ -297,3 +312,15 @@ class DecodedTm:
         if len(self.source_data) > PUS1_REQUEST_ID_SIZE:
             return self.source_data[PUS1_REQUEST_ID_SIZE]
         return None
+
+    @property
+    def event_id(self) -> int:
+        """The PUS-5 event-definition ID (first 2 source-data bytes,
+        big-endian). Only meaningful for PUS-5 TM."""
+        return int.from_bytes(self.source_data[:PUS5_EVENT_ID_SIZE], "big")
+
+    @property
+    def event_aux(self) -> bytes:
+        """The PUS-5 auxiliary data (source data after the 2-byte
+        event ID). Only meaningful for PUS-5 TM."""
+        return self.source_data[PUS5_EVENT_ID_SIZE:]

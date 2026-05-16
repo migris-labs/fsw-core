@@ -11,7 +11,7 @@ any specific mission. Mission-specific application software (e.g.
 [`cry4-fsw`](../cry4-fsw)) consumes `migris::fsw-core` as a versioned
 dependency.
 
-## Status — slice fsw-5 (PUS-1 TC verification over UART)
+## Status — slice fsw-6 (PUS-5 event reporting over UART)
 
 The repository now has these coherent faces:
 
@@ -47,6 +47,17 @@ The repository now has these coherent faces:
   sample is generalised and renamed `samples/tc_uart`; the round
   trip is exercised end-to-end by `tests/renode/test_tc_uart.py`.
   Wire format is pinned in [`docs/wire/pus-1.md`](docs/wire/pus-1.md).
+- **First asynchronous TM service** (slice fsw-6): a PUS-5 event-report
+  encoder (`lib/pus/pus5.{h,c}`) for the four severity subtypes
+  (info / low / medium / high). Unlike PUS-1/PUS-17 it is emitted
+  spontaneously, not in response to a TC: the `tc_uart` sample emits
+  one PUS-5[1] "FSW boot" event on reset — the first TM the FSW
+  produces — sharing the same per-APID sequence count as the
+  verification stream. The control subtypes ([5]–[8]) are excluded
+  (overlap PUS-20); there is deliberately no event queue yet. New host
+  suite `tests/pus5_test.cpp`; `tests/renode/test_tc_uart.py` asserts
+  the boot event end-to-end on the emulated `nucleo_h753zi`. Wire
+  format is pinned in [`docs/wire/pus-5.md`](docs/wire/pus-5.md).
 
 ## Pinned target (workspace-level)
 
