@@ -8,6 +8,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-8: FDIR primitives + router-side anomaly reporting +
+  the bounded event FIFO.** The framework's first fault-detection and
+  -reporting layer. A new freestanding C bounded **event FIFO**
+  (`lib/fdir/event_fifo.{h,c}` — drop-newest, single-context,
+  non-atomic) and **FDIR** module (`lib/fdir/fdir.{h,c}` — anomaly
+  registry, `report_anomaly`, the event-sink factory, and a
+  `drain`→PUS-5 encoder) sit behind a generic two-field **event-sink
+  vtable** (`lib/pus/include/migris/fsw/event_sink.h`) so the generic
+  TC router reports a rejected TC without depending on FDIR. The
+  router now reports every acceptance-stage rejection (length / CRC /
+  PUS-version / unknown-service) as a spontaneous **PUS-5[2]
+  `TC_REJECTED`** (event ID `0x0002`, aux = failure code + service
+  type + subtype) — *independent of the TC's ack flags*, so a no-ack
+  rejected TC stays PUS-1-silent yet still raises the anomaly. The
+  `tc_uart` sample also turns a UART RX-ring overflow into a
+  **PUS-5[3] `RX_OVERFLOW`** (event ID `0x0003`, aux = u32 bytes-
+  dropped delta): the ISR is unchanged (it only bumps its `volatile`
+  counter); the main loop observes the delta and is the sole FIFO
+  producer, so the FIFO stays single-context and non-atomic. The loop
+  drains one event per iteration into a spontaneous PUS-5 report,
+  *after* a TC's PUS-1 verification, keeping the shared per-APID CCSDS
+  sequence strictly monotonic across boot, verification/service
+  bursts, periodic housekeeping and anomalies. The PUS-5 context is
+  hoisted into `migris_tc_router_ctx_t` (alongside pus1/17/3), wired
+  via a nullable `sink` field (NULL = zero-init default = no FDIR, so
+  every prior caller and test is unaffected). New host suites
+  `tests/event_fifo_test.cpp` and `tests/fdir_test.cpp`;
+  `tests/tc_router_test.cpp` extended (mock sink: rejection→one LOW
+  anomaly with correct aux, accepted→none, the no-ack-still-raises
+  invariant, partially-init-sink safety, the [27]-poll de-zero
+  guard); `tests/renode/test_tc_uart.py` gains the ack and no-ack
+  rejection→anomaly round-trips and `test_tc_uart_hk.py` the polled
+  de-zero proof. Wire format pinned in
+  [`docs/wire/pus-5.md`](docs/wire/pus-5.md) (event IDs + the
+  spontaneous/ungated rationale), cross-referenced from
+  [`docs/wire/pus-1.md`](docs/wire/pus-1.md). Scoped decisions:
+  - **Event-sink seam, earned now.** A 2-field vtable is the minimum
+    that severs `lib/pus` → FDIR; it is not a speculative
+    generalisation (cf. the fsw-7 "switch, not a registration table"
+    rule) — it is earned by two independent producers this slice (the
+    router and the RX-overflow detector) and is the exact trigger
+    `pus5.h` named for the FIFO abstraction.
+  - **Detection + reporting only.** Isolation/Recovery — occurrence
+    counters with thresholds, debounce/confirmation, recovery actions,
+    mode transitions, FDIR enable/disable (PUS-5 control subtypes
+    5/6), persistence across reset — is **deferred**: it presupposes
+    a mode manager and a recoverable-subsystem consumer. *Trigger to
+    revisit*: the first slice introducing a mode manager or a
+    subsystem with a defined recovery action.
+  - **FIFO overflow is drop-newest** (the causal head — the first
+    faults — is preserved); the internal `dropped` count is a C-API
+    health field, **not on the wire** this slice (the PUS-3[25] block
+    is frozen; the per-severity PUS-5 message counter already lets
+    ground detect a gap). *Trigger*: a consumer that needs the drop
+    count downlinked.
+  - **Acceptance-stage rejections only.** Exec-stage completion
+    failures already get PUS-1[8]; a distinct anomaly class for them
+    is deferred until a driving need appears.
 - **Slice fsw-7: PUS-3 housekeeping & diagnostic telemetry.** New
   freestanding C housekeeping-report encoder (`lib/pus/pus3.{h,c}`),
   used by **both** a spontaneous periodic emitter and a TC[3,27]
@@ -105,7 +163,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the full PUS-1 + PUS-17 round-trip on the emulated `nucleo_h753zi`.
   Wire format pinned in [`docs/wire/pus-1.md`](docs/wire/pus-1.md).
 
+### Changed (breaking)
+- **PUS-3[25] PUS-5 counter sub-block on the TC[3,27]-polled path
+  (fsw-8).** Wire bytes 28..31 changed *value semantic* on a *polled*
+  housekeeping report from a pinned constant `00 00 00 00` to the live
+  PUS-5 message counters (identical to the spontaneous report). The
+  byte layout is unchanged. By the versioning rule in
+  [`docs/wire/pus-3.md`](docs/wire/pus-3.md) a value-semantic change
+  to an emitted field is breaking; it is recorded here as such. It is
+  the *planned, pre-blessed* resolution of the asymmetry that document
+  deliberately pinned in fsw-7 ("it disappears when the router gains a
+  PUS-5 producer"), not accidental drift. The project is pre-1.0
+  (SemVer 0.y.z) so no major bump is required, but any ground decoder
+  that special-cased "polled HK ⇒ bytes 28..31 are zero" must update.
+
 ### Changed
+- **`test_tc_uart.py` corrupted-TC expectation updated (fsw-8).** A
+  rejected TC now additionally yields a trailing PUS-5[2]
+  `TC_REJECTED` anomaly (and the no-ack case yields one with no
+  PUS-1). The renamed test asserts the new packet set; this is an
+  intended slice consequence — the closure of the fsw-6 "router-side
+  anomaly emission deferred" item — exactly analogous to the fsw-6
+  boot-event rebase, not a regression.
 - **`MIGRIS_TC_ROUTER_MAX_TM` raised 64 → 96** (fsw-7). The worst-case
   single-TC burst is now `PUS-1[1] (22) + PUS-3[25] (47) + PUS-1[7]
   (22) = 91`. This is a C-API / caller-buffer-size change only — **the

@@ -22,13 +22,13 @@
  * the point a condition is detected, not as a side effect of an
  * inbound TC. This header is a pure report *encoder* — the caller
  * decides when an event fires, owns the event identity, and owns the
- * output buffer; here we only serialise one report. There is
- * deliberately no event queue: PUS-5 stays the smallest viable
- * surface (the proven pus1/pus17 shape). A freestanding bounded event
- * FIFO is the explicit *next* abstraction, earned when a producer
- * that does not own a TM buffer first exists (an FDIR monitor, PUS-3
- * housekeeping, or the ISR-context UART RX-ring overflow event). Until
- * then it would be an abstraction with a single straight-line caller.
+ * output buffer; here we only serialise one report. PUS-5 itself
+ * stays a pure encoder (the proven pus1/pus17 shape) with no event
+ * queue: the freestanding bounded event FIFO that decouples a
+ * buffer-less producer from this encoder lives in lib/fdir/ as of
+ * slice fsw-8 (migris/fsw/fdir/event_fifo.h), earned by its first
+ * real producers — the TC router on a rejection and the main-loop
+ * UART RX-overflow detector.
  * Freestanding C — no Zephyr, no malloc, no stdlib.
  *
  * Event-definition IDs are a frozen cross-repo contract. The range
@@ -77,8 +77,25 @@ extern "C" {
 
 /** fsw-core framework event-definition IDs (reserved block
  *  0x0001..0x00FF). Mission events live at 0x0100+ and are not
- *  defined here. */
+ *  defined here. Adding an ID within the reserved block is a
+ *  non-breaking change (see docs/wire/pus-5.md). */
+
+/** Flight software (re)started. Severity info [1]; no auxiliary data. */
 #define MIGRIS_PUS5_EVT_FSW_BOOT 0x0001U
+
+/** A telecommand addressed to this AP failed acceptance. Severity
+ *  low [2]. Auxiliary data is 3 bytes — the PUS-1 failure code, then
+ *  the TC's service type and subtype (both 0 when the failure is a
+ *  length error, where the secondary header was not parseable). The
+ *  spontaneous, ack-flag-independent FDIR counterpart to the solicited
+ *  PUS-1 verification report (see docs/wire/pus-5.md). */
+#define MIGRIS_PUS5_EVT_TC_REJECTED 0x0002U
+
+/** UART RX-ring overflowed: inbound command bytes were dropped before
+ *  they could form a packet. Severity medium [3]. Auxiliary data is a
+ *  4-byte big-endian count of bytes dropped since the previous report
+ *  of this event. */
+#define MIGRIS_PUS5_EVT_RX_OVERFLOW 0x0003U
 
 /** Event severity. The wire subtype is ``severity + 1`` (INFO→[1],
  *  LOW→[2], MEDIUM→[3], HIGH→[4]); the enum value is also the index

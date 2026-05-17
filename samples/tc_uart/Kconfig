@@ -23,3 +23,17 @@ config FSW_PUS3_HK_PERIOD_SEC
 	  race the fixed-offset reads non-deterministically), and a
 	  dedicated housekeeping ELF pins it to 2 s for fast, deterministic
 	  cadence assertions.
+
+config FSW_FDIR_EVENT_FIFO_CAPACITY
+	int "FDIR event FIFO capacity (records)"
+	default 16
+	range 4 256
+	help
+	  Number of records the bounded FDIR event FIFO holds before it
+	  starts dropping the newest (the causal head — the first faults —
+	  is preserved). Wired into the freestanding lib via the
+	  MIGRIS_FDIR_EVENT_FIFO_CAPACITY compile definition so flight and
+	  host builds size the ring identically. The default (16) absorbs a
+	  burst of rejected TCs plus RX-overflow events between main-loop
+	  drains; raise it only if a producer can outpace one drain per
+	  loop iteration.

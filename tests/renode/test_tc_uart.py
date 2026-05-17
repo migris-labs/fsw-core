@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Migris Labs
 
-"""fsw-6 TC verification + PUS-5 event reporting round-trip over UART.
+"""fsw-8 TC verification + PUS-5 event reporting round-trip over UART.
 
 Boots ``samples/tc_uart/zephyr.elf`` on the Renode-bundled
 ``nucleo_h753zi`` platform. On reset the FSW emits one spontaneous
@@ -10,6 +10,12 @@ produces — and then services inbound PUS-17[1] TCs, emitting the
 PUS-1 / PUS-17 verification stream pinned in ``docs/wire/pus-1.md``
 and ``docs/wire/pus-17.md``. The boot event consumes the first
 per-APID sequence count, so the first TC response starts at count 1.
+
+Slice fsw-8 adds the FDIR path: a rejected TC additionally produces a
+spontaneous PUS-5[2] ``TC_REJECTED`` anomaly, drained from the FDIR
+FIFO *after* that TC's PUS-1 verification — and emitted even when the
+TC requested no verification (the anomaly is ungated by ack flags;
+``docs/wire/pus-5.md``).
 
 The ground-side encoder/decoder lives in ``_pus.py`` and is
 deliberately independent of the C codec under ``lib/pus/`` — the two
@@ -32,6 +38,8 @@ from _pus import (
     PUS_1_SUBTYPE_ACCEPTANCE_SUCCESS,
     PUS_1_SUBTYPE_COMPLETION_SUCCESS,
     PUS_5_SUBTYPE_INFO,
+    PUS_5_SUBTYPE_LOW,
+    PUS_17_SUBTYPE_ARE_YOU_ALIVE_TC,
     PUS_17_SUBTYPE_ARE_YOU_ALIVE_TM,
     PUS_SERVICE_EVENT_REPORTING,
     PUS_SERVICE_TEST,
@@ -41,12 +49,16 @@ from _pus import (
     PUS1_SUCCESS_TM_PACKET_SIZE,
     PUS5_BARE_TM_PACKET_SIZE,
     PUS5_EVT_FSW_BOOT,
+    PUS5_EVT_TC_REJECTED,
     PUS17_TM_PACKET_SIZE,
     SEQ_FLAGS_UNSEGMENTED,
     DecodedTm,
     build_pus17_are_you_alive_tc,
     split_packets,
 )
+
+# PUS-5[2] TC_REJECTED carries 3 aux bytes (fc, service type, subtype).
+PUS5_TC_REJECTED_PACKET_SIZE = PUS5_BARE_TM_PACKET_SIZE + 3
 from conftest import _RENODE_BIN, _TC_ELF, tc_running  # noqa: F401
 
 
@@ -195,14 +207,15 @@ def test_no_ack_flags_is_back_compatible(tc_running) -> None:  # noqa: F811
     ), uart.buffer().hex()
 
 
-def test_corrupted_tc_yields_single_acceptance_failure(tc_running) -> None:  # noqa: F811
+def test_corrupted_ack_tc_yields_pus1_failure_then_fdir_anomaly(  # noqa: F811
+    tc_running,
+) -> None:
     """A CRC-corrupted TC requesting acceptance verification produces
-    exactly one PUS-1[2] (CRC_FAILURE) and is neither routed nor
-    completed. The TC router is untouched in slice fsw-6 (no PUS-5
-    anomaly on rejection — that is deferred to the FDIR slice), so the
-    only change here is the leading boot event and the +1 seq rebase.
-    A follow-up valid TC proves the FSW is still live and that the
-    rejected TC leaked nothing else."""
+    its PUS-1[2] (CRC_FAILURE) and, from slice fsw-8, a spontaneous
+    PUS-5[2] ``TC_REJECTED`` anomaly drained right after it — the
+    PUS-1 ack precedes the anomaly on the wire. The TC is still neither
+    routed nor completed. A follow-up clean no-ack TC proves the FSW
+    is live and that the rejected TC leaked nothing else."""
     _, uart = tc_running
 
     bad = bytearray(
@@ -213,34 +226,93 @@ def test_corrupted_tc_yields_single_acceptance_failure(tc_running) -> None:  # n
     bad[-1] ^= 0xFF  # flip the low CRC byte
     uart.send(bytes(bad))
 
-    # Rejected TC → one PUS-1[2]. Then a clean no-ack TC → one PUS-17[2].
+    # Rejected TC → PUS-1[2] then PUS-5[2]. Then a clean no-ack TC → PUS-17[2].
     good_source = 0x1234
     uart.send(build_pus17_are_you_alive_tc(ack_flags=0, source_id=good_source))
 
-    total = PUS1_FAILURE_TM_PACKET_SIZE + PUS17_TM_PACKET_SIZE
+    total = (
+        PUS1_FAILURE_TM_PACKET_SIZE
+        + PUS5_TC_REJECTED_PACKET_SIZE
+        + PUS17_TM_PACKET_SIZE
+    )
     boot, raw = _read_after_boot(uart, total, timeout=30.0)
     _assert_boot_event(boot)
 
     pkts = split_packets(raw)
-    assert len(pkts) == 2, raw.hex()
+    assert len(pkts) == 3, raw.hex()
+    fail, anomaly, live = (DecodedTm.decode(p) for p in pkts)
 
-    fail = DecodedTm.decode(pkts[0])
+    # 1. PUS-1[2] acceptance failure (the solicited verification).
     assert fail.secondary.service_type == PUS_SERVICE_VERIFICATION
     assert fail.secondary.service_subtype == PUS_1_SUBTYPE_ACCEPTANCE_FAILURE
     assert fail.failure_code == FC_CRC_FAILURE
     assert fail.secondary.destination_id == 0xAA55
     assert fail.primary.seq_count == 1  # boot event consumed count 0
-    assert fail.crc_ok
 
-    live = DecodedTm.decode(pkts[1])
+    # 2. PUS-5[2] TC_REJECTED FDIR anomaly, strictly after the ack.
+    assert anomaly.secondary.service_type == PUS_SERVICE_EVENT_REPORTING
+    assert anomaly.secondary.service_subtype == PUS_5_SUBTYPE_LOW
+    assert anomaly.secondary.destination_id == 0  # spontaneous
+    assert anomaly.event_id == PUS5_EVT_TC_REJECTED
+    assert anomaly.event_aux == bytes(
+        [FC_CRC_FAILURE, PUS_SERVICE_TEST, PUS_17_SUBTYPE_ARE_YOU_ALIVE_TC]
+    )
+    assert anomaly.primary.seq_count == 2
+
+    # 3. The clean follow-up TC still serviced.
     assert live.secondary.service_subtype == PUS_17_SUBTYPE_ARE_YOU_ALIVE_TM
     assert live.secondary.destination_id == good_source
-    assert live.primary.seq_count == 2  # shared counter advanced once more
+    assert live.primary.seq_count == 3
 
-    # Nothing else followed the boot event + two expected packets.
+    for t in (fail, anomaly, live):
+        assert t.crc_ok, raw.hex()
+    # Nothing else followed the boot event + three expected packets.
     assert (
         len(uart.buffer()) == PUS5_BARE_TM_PACKET_SIZE + total
     ), uart.buffer().hex()
+
+
+def test_no_ack_rejection_is_pus1_silent_but_raises_anomaly(  # noqa: F811
+    tc_running,
+) -> None:
+    """The key fsw-8 invariant on real hardware: a CRC-corrupted TC
+    with *no* ack flags stays PUS-1-silent (rule 3) yet still emits the
+    spontaneous PUS-5[2] ``TC_REJECTED`` anomaly. A clean no-ack TC
+    after it proves liveness and that no PUS-1 leaked."""
+    _, uart = tc_running
+
+    bad = bytearray(build_pus17_are_you_alive_tc(ack_flags=0, source_id=0x9001))
+    bad[-1] ^= 0xFF
+    uart.send(bytes(bad))
+
+    good_source = 0x4242
+    uart.send(build_pus17_are_you_alive_tc(ack_flags=0, source_id=good_source))
+
+    total = PUS5_TC_REJECTED_PACKET_SIZE + PUS17_TM_PACKET_SIZE
+    boot, raw = _read_after_boot(uart, total, timeout=30.0)
+    _assert_boot_event(boot)
+
+    pkts = split_packets(raw)
+    assert len(pkts) == 2, raw.hex()
+    anomaly, live = (DecodedTm.decode(p) for p in pkts)
+
+    # No PUS-1 anywhere — the corrupted no-ack TC requested no
+    # verification, so rule 3 keeps the FSW PUS-1-silent.
+    assert all(
+        t.secondary.service_type != PUS_SERVICE_VERIFICATION
+        for t in (anomaly, live)
+    ), raw.hex()
+
+    assert anomaly.secondary.service_type == PUS_SERVICE_EVENT_REPORTING
+    assert anomaly.secondary.service_subtype == PUS_5_SUBTYPE_LOW
+    assert anomaly.event_id == PUS5_EVT_TC_REJECTED
+    assert anomaly.event_aux[0] == FC_CRC_FAILURE
+    assert anomaly.primary.seq_count == 1  # boot consumed 0; no PUS-1 emitted
+
+    assert live.secondary.service_subtype == PUS_17_SUBTYPE_ARE_YOU_ALIVE_TM
+    assert live.secondary.destination_id == good_source
+    assert live.primary.seq_count == 2
+    assert anomaly.crc_ok and live.crc_ok, raw.hex()
 
 
 def test_sequence_count_coherent_across_consecutive_tcs(tc_running) -> None:  # noqa: F811

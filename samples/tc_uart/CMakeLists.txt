@@ -9,6 +9,7 @@ project(fsw_core_tc_uart LANGUAGES C)
 # into migris::fsw-core — keeping the wire-format bytes identical between flight and host tests is
 # the whole point of the layout.
 set(MIGRIS_FSW_PUS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/pus)
+set(MIGRIS_FSW_FDIR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/fdir)
 
 target_sources(
   app
@@ -20,6 +21,16 @@ target_sources(
           ${MIGRIS_FSW_PUS_DIR}/src/pus5.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus17.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus3.c
-          ${MIGRIS_FSW_PUS_DIR}/src/tc_router.c)
+          ${MIGRIS_FSW_PUS_DIR}/src/tc_router.c
+          ${MIGRIS_FSW_FDIR_DIR}/src/event_fifo.c
+          ${MIGRIS_FSW_FDIR_DIR}/src/fdir.c)
 
-target_include_directories(app PRIVATE ${MIGRIS_FSW_PUS_DIR}/include)
+target_include_directories(app PRIVATE ${MIGRIS_FSW_PUS_DIR}/include
+                                       ${MIGRIS_FSW_FDIR_DIR}/include)
+
+# Size the freestanding event FIFO from Kconfig. Applied to the whole
+# `app` target (every lib TU above is part of it) so the struct size is
+# identical across all sample TUs; the host library build has no such
+# define and uses the lib default.
+target_compile_definitions(
+  app PRIVATE MIGRIS_FDIR_EVENT_FIFO_CAPACITY=${CONFIG_FSW_FDIR_EVENT_FIFO_CAPACITY})

@@ -142,16 +142,15 @@ the wire.
 
 ### Note — PUS-5 counter sub-block (bytes 28..31)
 
-These reflect the framework PUS-5 counters **as visible to the
-emitter**. The spontaneous periodic report is emitted by the
-application, which owns the PUS-5 context, so it carries the live
-values. A TC[3,27]-polled report is emitted from inside the TC router,
-which does **not** own the PUS-5 context — hoisting it in is the
-explicitly deferred "FDIR raises events from inside the router"
-abstraction (see `lib/pus/include/migris/fsw/pus/pus5.h`). A polled
-report therefore carries `00 00 00 00` for bytes 28..31. This asymmetry
-is intentional and pinned here; it disappears when the router gains a
-PUS-5 producer.
+These reflect the framework PUS-5 counters. **As of slice fsw-8 the TC
+router owns the PUS-5 context**, so *both* the spontaneous periodic
+report and a TC[3,27]-polled report carry the **live** values — they
+are now identical here. The fsw-7 asymmetry (a polled report carried
+`00 00 00 00` because the router did not own the PUS-5 context) is
+**resolved**: the router gained a PUS-5 producer (FDIR anomaly events),
+exactly the condition this note previously pinned as the trigger. See
+the *Versioning* section for the breaking-change classification of
+this change.
 
 ## TC[3,27] — generate a one-shot report
 
@@ -192,3 +191,19 @@ narrowing it, or reordering fields, is breaking**. Adding a new
 framework structure under a new SID, or adding the deferred subtypes
 with their own source data, is non-breaking provided the existing
 structure and the rules above are unchanged.
+
+### Breaking change in slice fsw-8 — bytes 28..31 on the polled path
+
+The byte *layout* is unchanged, but the *value semantic* of bytes
+28..31 (the PUS-5 counter sub-block) on a **TC[3,27]-polled** report
+changed from a pinned constant `00 00 00 00` to the live PUS-5
+counters. By the rule above this is a **breaking change** (a
+value-semantic change to an emitted field), and it is recorded in
+`CHANGELOG.md` under *Changed (breaking)*. It is the *planned,
+pre-blessed* resolution of the asymmetry this document deliberately
+pinned in fsw-7 ("it disappears when the router gains a PUS-5
+producer"), not an accidental drift. The project is pre-1.0 (SemVer
+0.y.z), so no major-version bump is required, but any ground decoder
+that special-cased "a polled housekeeping report ⇒ bytes 28..31 are
+zero" must be updated to read them as live counters (identical to the
+spontaneous report).

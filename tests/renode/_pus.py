@@ -119,6 +119,8 @@ PUS5_BARE_TM_PACKET_SIZE = 20
 
 # fsw-core framework event-definition IDs (reserved block 0x0001..0x00FF).
 PUS5_EVT_FSW_BOOT = 0x0001
+PUS5_EVT_TC_REJECTED = 0x0002  # aux: fc, service_type, service_subtype (3 bytes)
+PUS5_EVT_RX_OVERFLOW = 0x0003  # aux: bytes-dropped delta (u32, big-endian)
 
 # PUS-3 housekeeping & diagnostic data reporting (docs/wire/pus-3.md).
 PUS_SERVICE_HOUSEKEEPING = 3
