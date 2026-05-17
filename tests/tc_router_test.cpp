@@ -9,10 +9,12 @@
 
 #include "migris/fsw/pus/tc_router.h"
 
+#include "migris/fsw/event_sink.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
 #include "migris/fsw/pus/pus17.h"
 #include "migris/fsw/pus/pus3.h"
+#include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/pus_tc.h"
 #include "migris/fsw/pus/pus_tm.h"
 
@@ -177,6 +179,49 @@ migris_tc_router_ctx_t make_ctx() {
     migris_tc_router_ctx_t ctx{};
     ctx.apid = test_apid;
     return ctx;
+}
+
+// Source-data offset of the four PUS-5 message counters within a
+// PUS-3[25] report (docs/wire/pus-3.md wire bytes 28..31).
+constexpr std::size_t hk_off_pus5 = 12U;
+
+std::uint8_t hk_byte(const std::uint8_t* pkt, std::size_t src_off) {
+    return pkt[MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TM_SECONDARY_HEADER_SIZE + src_off];
+}
+
+// Mock FDIR event sink: records what the router reported. The thunk is
+// `extern "C"` so it is assignment-compatible with the C-linkage
+// function pointer in migris_event_sink_t.
+struct SinkSpy {
+    int calls = 0;
+    std::uint32_t last_now = 0U;
+    int last_severity = -1;
+    std::uint16_t last_event_id = 0U;
+    std::vector<std::uint8_t> last_aux;
+};
+
+extern "C" {
+int tc_router_test_spy_report(void* self,
+                              std::uint32_t now_seconds,
+                              migris_pus5_severity_t severity,
+                              std::uint16_t event_id,
+                              const std::uint8_t* aux,
+                              std::size_t aux_len) {
+    auto* spy = static_cast<SinkSpy*>(self);
+    spy->calls++;
+    spy->last_now = now_seconds;
+    spy->last_severity = static_cast<int>(severity);
+    spy->last_event_id = event_id;
+    spy->last_aux.assign(aux, aux + aux_len);
+    return 0;
+}
+}
+
+migris_event_sink_t spy_sink(SinkSpy& spy) {
+    migris_event_sink_t sink;
+    sink.report = tc_router_test_spy_report;
+    sink.self = &spy;
+    return sink;
 }
 
 TEST(TcRouter, AcceptedNoAckFlagsEmitsOnlyServiceTm) {
@@ -536,6 +581,119 @@ TEST(TcRouter, HkReportCarriesRouterCounters) {
     // very report observes itself counted.
     EXPECT_EQ(hk_u32(out.data(), hk_off_accepted), 1U);
     EXPECT_EQ(hk_u32(out.data(), hk_off_drops), 0x12345678U);
+}
+
+// --- fsw-8: PUS-5 hoist (de-zero) + router-side FDIR anomaly ----------
+
+TEST(TcRouter, Pus3PollCarriesLivePus5Counters) {
+    auto ctx = make_ctx();
+    // The router now owns the PUS-5 context; a [27]-polled report
+    // carries the live counters (fsw-7 zero-on-polled asymmetry gone).
+    ctx.pus5.msg_counter[0] = 3U;
+    ctx.pus5.msg_counter[1] = 5U;
+    ctx.pus5.msg_counter[2] = 7U;
+    ctx.pus5.msg_counter[3] = 9U;
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                              .service_subtype = MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL,
+                              .source_id = 0x44U},
+                             sid_app(MIGRIS_PUS3_SID_FRAMEWORK_DIAG));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    ASSERT_EQ(n, static_cast<int>(MIGRIS_PUS3_HK_TM_PACKET_SIZE));
+    EXPECT_EQ((std::array<std::uint8_t, 4>{hk_byte(out.data(), hk_off_pus5),
+                                           hk_byte(out.data(), hk_off_pus5 + 1U),
+                                           hk_byte(out.data(), hk_off_pus5 + 2U),
+                                           hk_byte(out.data(), hk_off_pus5 + 3U)}),
+              (std::array<std::uint8_t, 4>{3U, 5U, 7U, 9U}));
+}
+
+TEST(TcRouter, CrcRejectionFiresOneLowAnomalyWithCause) {
+    auto ctx = make_ctx();
+    SinkSpy spy;
+    const auto sink = spy_sink(spy);
+    ctx.sink = &sink;
+    const auto tc = build_tc({.service_subtype = MIGRIS_PUS17_SUBTYPE_ARE_YOU_ALIVE_TC,
+                              .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE,
+                              .source_id = 0xAA55U,
+                              .corrupt_crc = true});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n =
+        migris_tc_router_dispatch(&ctx, 0x42U, tc.data(), tc.size(), out.data(), out.size());
+    // PUS-1[2] still emitted (ack requested); the anomaly is separate.
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 1U);
+    EXPECT_EQ(key(tms[0]), pus1_accept_fail_key);
+
+    EXPECT_EQ(spy.calls, 1);
+    EXPECT_EQ(spy.last_now, 0x42U);
+    EXPECT_EQ(spy.last_severity, static_cast<int>(MIGRIS_PUS5_SEV_LOW));
+    EXPECT_EQ(spy.last_event_id, MIGRIS_PUS5_EVT_TC_REJECTED);
+    EXPECT_EQ(spy.last_aux,
+              (std::vector<std::uint8_t>{static_cast<std::uint8_t>(MIGRIS_PUS1_FC_CRC_FAILURE),
+                                         MIGRIS_PUS_SERVICE_TEST,
+                                         MIGRIS_PUS17_SUBTYPE_ARE_YOU_ALIVE_TC}));
+}
+
+TEST(TcRouter, NoAckRejectionIsPus1SilentButStillRaisesAnomaly) {
+    // The key fsw-8 correctness invariant: PUS-1 "no-ack ⇒ silence" is
+    // preserved (rule 3, byte-for-byte) while the spontaneous PUS-5
+    // FDIR anomaly fires regardless of the ack flags.
+    auto ctx = make_ctx();
+    SinkSpy spy;
+    const auto sink = spy_sink(spy);
+    ctx.sink = &sink;
+    const auto tc = build_tc({.corrupt_crc = true});  // no ack flags
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 7U, tc.data(), tc.size(), out.data(), out.size());
+    EXPECT_EQ(n, 0);  // PUS-1 silent — no verification requested
+    EXPECT_EQ(spy.calls, 1);
+    EXPECT_EQ(spy.last_severity, static_cast<int>(MIGRIS_PUS5_SEV_LOW));
+    EXPECT_EQ(spy.last_event_id, MIGRIS_PUS5_EVT_TC_REJECTED);
+    EXPECT_EQ(spy.last_aux[0], static_cast<std::uint8_t>(MIGRIS_PUS1_FC_CRC_FAILURE));
+}
+
+TEST(TcRouter, LengthErrorAnomalyHasZeroServiceFields) {
+    auto ctx = make_ctx();
+    SinkSpy spy;
+    const auto sink = spy_sink(spy);
+    ctx.sink = &sink;
+    // A forged data length makes the secondary header unparseable, so
+    // service type/subtype are not known — aux carries them as 0.
+    const auto tc = build_tc({.source_id = 0x55U, .data_length_override = 99});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    EXPECT_EQ(spy.calls, 1);
+    EXPECT_EQ(spy.last_event_id, MIGRIS_PUS5_EVT_TC_REJECTED);
+    EXPECT_EQ(spy.last_aux,
+              (std::vector<std::uint8_t>{
+                  static_cast<std::uint8_t>(MIGRIS_PUS1_FC_LENGTH_ERROR), 0U, 0U}));
+}
+
+TEST(TcRouter, AcceptedTcFiresNoAnomaly) {
+    auto ctx = make_ctx();
+    SinkSpy spy;
+    const auto sink = spy_sink(spy);
+    ctx.sink = &sink;
+    const auto tc = build_tc({.ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE, .source_id = 0x1U});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    EXPECT_EQ(spy.calls, 0);  // a clean command is not an anomaly
+}
+
+TEST(TcRouter, PartiallyInitialisedSinkIsSafe) {
+    auto ctx = make_ctx();
+    migris_event_sink_t sink;
+    sink.report = nullptr;  // non-NULL sink, NULL report — must not crash
+    sink.self = nullptr;
+    ctx.sink = &sink;
+    const auto tc = build_tc({.corrupt_crc = true});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+    EXPECT_EQ(migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size()), 0);
 }
 
 }  // namespace

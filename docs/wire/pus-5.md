@@ -56,9 +56,43 @@ mission-side numbering is deferred to its first consumer.
 
 ### Defined framework event IDs
 
-| Event ID | Name       | Severity | Meaning                          |
-|----------|------------|----------|----------------------------------|
-| `0x0001` | `FSW_BOOT` | info [1] | Flight software (re)started      |
+| Event ID | Name          | Severity   | Meaning / auxiliary data                                                                 |
+|----------|---------------|------------|------------------------------------------------------------------------------------------|
+| `0x0001` | `FSW_BOOT`    | info [1]   | Flight software (re)started. No auxiliary data.                                          |
+| `0x0002` | `TC_REJECTED` | low [2]    | A telecommand addressed to this AP failed acceptance. Aux = 3 bytes: PUS-1 failure code, TC service type, TC service subtype (service type/subtype are `00` on a length error, where the secondary header was not parseable). |
+| `0x0003` | `RX_OVERFLOW` | medium [3] | UART RX-ring overflow — inbound command bytes were dropped before forming a packet. Aux = 4 bytes: count of bytes dropped since the previous `RX_OVERFLOW` report, big-endian u32. |
+
+`0x0002` and `0x0003` are added by slice fsw-8. Adding an event ID
+within the reserved `0x0001`–`0x00FF` block is **non-breaking** (see
+*Versioning* below). The severity column is the **single source of
+truth** for how each anomaly classifies on the wire (it selects the
+report subtype, `subtype = severity + 1`); it is owned by the FDIR
+anomaly registry (`lib/fdir/src/fdir.c`) and is one edit to retune.
+
+### FDIR-produced events are spontaneous and ungated by TC ack flags
+
+`TC_REJECTED` and `RX_OVERFLOW` are produced by the FDIR layer and,
+like every PUS-5 report, are **spontaneous**: emitted when the
+condition is detected, **not** gated by any TC's verification ack
+flags. This matters most for `TC_REJECTED`. A PUS-5 anomaly and a
+PUS-1 verification report answer different questions on the same APID:
+
+- **PUS-1** is *solicited verification* — it exists only because a TC
+  asked for it via its ack flags. A rejected TC that requested no
+  acceptance verification correctly produces **no PUS-1** (the
+  "no-ack ⇒ silence" rule in [`pus-1.md`](pus-1.md) holds,
+  byte-for-byte unchanged).
+- **PUS-5** is *spontaneous FDIR telemetry* — a bad command arriving
+  is a detected condition regardless of whether that command asked to
+  be ack'd.
+
+So a no-ack rejected TC is PUS-1-silent **and** emits a PUS-5[2]
+`TC_REJECTED`; an ack-requesting rejected TC emits the PUS-1[2]
+failure report first (from the TC's verification burst) and then,
+asynchronously, the PUS-5[2] anomaly (drained from the FDIR FIFO by
+the buffer owner on a later loop step). Both consume the shared
+per-APID sequence count, so the wire stays strictly monotonic across
+them.
 
 ## PUS-5 is asynchronous
 

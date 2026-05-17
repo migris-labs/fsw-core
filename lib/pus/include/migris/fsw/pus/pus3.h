@@ -117,14 +117,11 @@ typedef struct {
  *  spontaneous report; the TC router for a [27] poll) fills this from
  *  the router context plus its ISR RX-overflow counter snapshot.
  *
- *  ``pus5_msg_counter`` reflects the framework PUS-5 counters *as
- *  visible to the emitter*. The spontaneous report (emitted by the
- *  application, which owns the PUS-5 context) carries the live values;
- *  a [27]-polled report emitted from inside the router carries zeros
- *  there, because the router does not own the PUS-5 context — hoisting
- *  it in is the deferred "FDIR raises events from inside the router"
- *  abstraction (see pus5.h). This asymmetry is pinned in
- *  docs/wire/pus-3.md. */
+ *  ``pus5_msg_counter`` reflects the framework PUS-5 counters. As of
+ *  slice fsw-8 the TC router owns the PUS-5 context, so both the
+ *  spontaneous report and a [27]-polled report carry the *live*
+ *  values — the fsw-7 zero-on-the-polled-path asymmetry is resolved
+ *  (see docs/wire/pus-3.md). */
 typedef struct {
     uint8_t pus1_msg_counter[4];  /**< accept-ok / accept-fail / compl-ok / compl-fail. */
     uint8_t pus5_msg_counter[4];  /**< info / low / medium / high. */

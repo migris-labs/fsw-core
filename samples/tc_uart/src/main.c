@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Migris Labs
  *
- * fsw-6 TC reception + verification + event reporting sample.
+ * fsw-8 TC reception + verification + FDIR event reporting sample.
  *
  * Boots Zephyr on nucleo_h753zi, emits one spontaneous PUS-5[1]
  * "FSW boot" informative event (the first TM the FSW produces, the
@@ -27,6 +27,14 @@
  *                                                                  ▼
  *                                                   uart_poll_out  ◀── out[]
  *
+ * Slice fsw-8 adds FDIR: the TC router reports a rejected TC to an
+ * FDIR event sink, and the main loop also detects UART RX-ring
+ * overflow, both feeding a bounded event FIFO. Once per iteration the
+ * loop drains one FIFO record into a spontaneous PUS-5 anomaly report
+ * (drained *after* a TC's PUS-1 verification, so the ack precedes the
+ * anomaly on the wire). The FIFO is single-context: every producer
+ * runs in the main loop; the RX ISR only bumps its own counter.
+ *
  * Single producer (the RX IRQ) and single consumer (main thread)
  * make ring_buf safe without explicit locking. We send TM with
  * blocking ``uart_poll_out`` — this slice has no concurrent TX
@@ -42,6 +50,7 @@
  * ASM one layer down, not on the Space Packet layer.
  */
 
+#include "migris/fsw/fdir/fdir.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus5.h"
@@ -80,9 +89,12 @@ RING_BUF_DECLARE(rx_ring, RX_RING_SIZE);
  * 32-bit access is atomic on Cortex-M7 and telemetry only needs a
  * recent value, so single-writer / single-reader + `volatile` (to
  * defeat caching across loop iterations) is the minimal correct
- * mechanism — no atomic_t, no irq-lock, no event FIFO (that
- * abstraction stays deferred, see lib/pus/.../pus5.h and the fsw-6
- * CHANGELOG entry). Surfaced in the PUS-3 housekeeping report. */
+ * mechanism — no atomic_t, no irq-lock. The ISR deliberately does
+ * *not* touch the FDIR event FIFO: the main loop observes the delta
+ * of this counter and is the sole FIFO producer, keeping the FIFO
+ * single-context and non-atomic (slice fsw-8). Surfaced both as the
+ * cumulative PUS-3 housekeeping counter and as a PUS-5 RX_OVERFLOW
+ * anomaly. */
 static volatile uint32_t rx_ring_overflow_drops;
 
 static void uart_isr(const struct device* dev, void* user_data) {
@@ -99,11 +111,10 @@ static void uart_isr(const struct device* dev, void* user_data) {
             break;
         }
         /* Drop bytes when the ring fills — this is a smoke test, not
-         * a flow-controlled link. The drop is now *counted* (slice
-         * fsw-7) and reported in the PUS-3 housekeeping structure;
-         * raising an asynchronous overflow *event* from ISR context
-         * still wants a freestanding bounded event FIFO and stays
-         * deferred (see lib/pus/.../pus5.h). */
+         * a flow-controlled link. The drop is *counted* here only; the
+         * main loop turns an increase of this counter into a PUS-5
+         * RX_OVERFLOW anomaly (slice fsw-8). The ISR stays free of the
+         * FIFO so it remains single-context and non-atomic. */
         if (ring_buf_put(&rx_ring, &byte, 1) != 1U) {
             rx_ring_overflow_drops++;
         }
@@ -117,15 +128,12 @@ static void uart_tx_blocking(const struct device* dev, const uint8_t* buf, size_
 }
 
 /* Build the framework PUS-3 housekeeping parameter snapshot for the
- * *spontaneous* periodic report. Unlike the router's [27]-poll path,
- * this carries the live PUS-5 counters: the application owns the PUS-5
- * context, so it can report it accurately. */
-static void fill_hk_params(const migris_tc_router_ctx_t* router,
-                           const migris_pus5_ctx_t* pus5_ctx,
-                           migris_pus3_hk_params_t* p) {
+ * *spontaneous* periodic report. Both this and the router's [27]-poll
+ * path now read the same router-owned PUS-5 counters (slice fsw-8). */
+static void fill_hk_params(const migris_tc_router_ctx_t* router, migris_pus3_hk_params_t* p) {
     for (size_t i = 0U; i < 4U; ++i) {
         p->pus1_msg_counter[i] = router->pus1.msg_counter[i];
-        p->pus5_msg_counter[i] = pus5_ctx->msg_counter[i];
+        p->pus5_msg_counter[i] = router->pus5.msg_counter[i];
     }
     p->pus17_tm_msg_counter = router->pus17.tm_msg_counter;
     p->tc_accepted_count = router->tc_accepted_count;
@@ -150,6 +158,14 @@ int main(void) {
         .apid = MIGRIS_FSW_APID,
     };
 
+    /* FDIR: detection + event reporting. The router reports a rejected
+     * TC through this sink; the loop also feeds it RX-overflow events.
+     * Both land in the bounded FIFO the loop drains into PUS-5. */
+    migris_fdir_ctx_t fdir;
+    migris_fdir_init(&fdir);
+    const migris_event_sink_t fdir_sink = migris_fdir_event_sink(&fdir);
+    ctx.sink = &fdir_sink;
+
     uint8_t tc[TC_BUF_SIZE];
     uint8_t out[MIGRIS_TC_ROUTER_MAX_TM];
     size_t have = 0U;
@@ -161,12 +177,11 @@ int main(void) {
      * `tm_seq_count` (a plain uint16_t field) so the boot event
      * consumes count 0 and the per-APID sequence stays strictly
      * monotonic across it and every subsequent verification / service
-     * packet. `pus5_ctx` is sample-local for now; it moves into
-     * migris_tc_router_ctx_t (alongside pus1/pus17) when an FDIR
-     * consumer raises events from inside the router. */
-    migris_pus5_ctx_t pus5_ctx = {0};
+     * packet. The PUS-5 context now lives in the router context
+     * (slice fsw-8), shared by the boot event, the [27]-polled
+     * housekeeping report and the FDIR anomaly drain. */
     const uint32_t boot_sec = (uint32_t)(k_uptime_get() / 1000);
-    const int boot_n = migris_pus5_build_event_report(&pus5_ctx,
+    const int boot_n = migris_pus5_build_event_report(&ctx.pus5,
                                                       ctx.apid,
                                                       &ctx.tm_seq_count,
                                                       boot_sec,
@@ -182,15 +197,20 @@ int main(void) {
     }
 
     /* Slice fsw-7: spontaneous periodic PUS-3[25] housekeeping report.
-     * `pus3_ctx` is sample-local (same rationale as `pus5_ctx`). The
-     * first report fires one full period *after* boot — not
-     * immediately — so a sub-second TC exchange always completes within
-     * a period and the per-APID sequence stays a single monotonic
-     * space across the boot event, every verification / service burst,
-     * and each periodic report (all share `&ctx.tm_seq_count`, all run
+     * `pus3_ctx` is sample-local. The first report fires one full
+     * period *after* boot — not immediately — so a sub-second TC
+     * exchange always completes within a period and the per-APID
+     * sequence stays a single monotonic space across the boot event,
+     * every verification / service burst, each periodic report, and
+     * each drained FDIR anomaly (all share `&ctx.tm_seq_count`, all run
      * sequentially in this single thread). */
     migris_pus3_ctx_t pus3_ctx = {0};
     uint32_t last_hk_emit_sec = boot_sec;
+
+    /* Last RX-overflow drop count already turned into a PUS-5 event.
+     * The ISR only bumps `rx_ring_overflow_drops`; the loop (the sole
+     * FIFO producer) reports the *delta* as an RX_OVERFLOW anomaly. */
+    uint32_t last_reported_rx_drops = 0U;
 
     for (;;) {
         /* One FSW-clock read per iteration, reused by the periodic
@@ -207,7 +227,7 @@ int main(void) {
         if (now_sec - last_hk_emit_sec >= (uint32_t)CONFIG_FSW_PUS3_HK_PERIOD_SEC) {
             ctx.rx_ring_overflow_drops = rx_ring_overflow_drops;
             migris_pus3_hk_params_t hp;
-            fill_hk_params(&ctx, &pus5_ctx, &hp);
+            fill_hk_params(&ctx, &hp);
             const int hk_n = migris_pus3_build_hk_report(&pus3_ctx,
                                                          ctx.apid,
                                                          &ctx.tm_seq_count,
@@ -221,6 +241,29 @@ int main(void) {
                 uart_tx_blocking(uart_dev, out, (size_t)hk_n);
             }
             last_hk_emit_sec = now_sec;
+        }
+
+        /* RX-overflow detector (slice fsw-8). The loop, not the ISR,
+         * is the FIFO producer: on an increase of the ISR's drop
+         * counter, report the delta as a PUS-5 RX_OVERFLOW anomaly. */
+        const uint32_t rx_drops = rx_ring_overflow_drops;
+        if (rx_drops != last_reported_rx_drops) {
+            migris_fdir_report_anomaly(
+                &fdir, MIGRIS_FDIR_ANOM_RX_OVERFLOW, now_sec, rx_drops - last_reported_rx_drops);
+            last_reported_rx_drops = rx_drops;
+        }
+
+        /* Drain one FDIR event per iteration into a spontaneous PUS-5
+         * report. Checked every iteration (including the idle path),
+         * after the periodic report and *before* the TC handling — a
+         * rejected TC enqueues its anomaly during dispatch below, so
+         * it surfaces on the next iteration, strictly after that TC's
+         * PUS-1 verification went out. The shared `out[]` is fully
+         * transmitted before the loop proceeds. */
+        const int fdir_n =
+            migris_fdir_drain(&fdir, ctx.apid, &ctx.tm_seq_count, &ctx.pus5, out, sizeof(out));
+        if (fdir_n > 0) {
+            uart_tx_blocking(uart_dev, out, (size_t)fdir_n);
         }
 
         uint8_t b = 0U;

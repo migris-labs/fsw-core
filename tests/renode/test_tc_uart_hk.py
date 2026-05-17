@@ -158,7 +158,10 @@ def test_oneshot_poll_round_trip(tc_hk_running) -> None:  # noqa: F811
     yields the contiguous burst PUS-1[1] · PUS-3[25] · PUS-1[7] (one
     dispatch, so no periodic report can splice into it), distinguishable
     from the spontaneous reports by destination ID. The shared per-APID
-    sequence is strictly monotonic across the triplet."""
+    sequence is strictly monotonic across the triplet. From slice fsw-8
+    the polled report also carries the *live* PUS-5 counters (the
+    router now owns the PUS-5 context) — the fsw-7 zero-on-the-polled-
+    path asymmetry is resolved."""
     _, uart = tc_hk_running
 
     source_id = 0x0055
@@ -204,6 +207,15 @@ def test_oneshot_poll_round_trip(tc_hk_running) -> None:  # noqa: F811
     assert acc.primary.seq_count + 1 == hk.primary.seq_count
     assert hk.primary.seq_count + 1 == comp.primary.seq_count
     assert acc.crc_ok and hk.crc_ok and comp.crc_ok
+
+    # fsw-8 de-zero proof: the PUS-5 counter sub-block is source-data
+    # bytes [12:16] (wire bytes 28..31, docs/wire/pus-3.md). Pre-fsw-8 a
+    # *polled* report hardcoded these to 00 00 00 00; now the router
+    # owns the PUS-5 context so they are live. The spontaneous PUS-5[1]
+    # boot event already advanced the info counter, so byte 12 (info)
+    # is non-zero on this polled report — the asymmetry is gone.
+    pus5_counters = hk.source_data[12:16]
+    assert pus5_counters[0] >= 1, pus5_counters.hex()
 
 
 def test_rx_overflow_counter_zero_under_nominal_traffic(tc_hk_running) -> None:  # noqa: F811

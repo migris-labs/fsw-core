@@ -32,9 +32,11 @@
 #ifndef MIGRIS_FSW_PUS_TC_ROUTER_H_
 #define MIGRIS_FSW_PUS_TC_ROUTER_H_
 
+#include "migris/fsw/event_sink.h"
 #include "migris/fsw/pus/pus1.h"
-#include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus17.h"
+#include "migris/fsw/pus/pus3.h"
+#include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/pus_tc.h"
 
 #include <stddef.h>
@@ -66,13 +68,18 @@ typedef enum {
 /** Router state for one application process. Caller-owned,
  *  zero-initialised once at startup (then set ``apid``). Holds the
  *  shared per-APID CCSDS TM sequence count and each service's PUS
- *  message-counter sub-context. */
+ *  message-counter sub-context — including PUS-5, which the router now
+ *  owns: a TC[3,27]-polled housekeeping report therefore carries the
+ *  *live* PUS-5 counters (the fsw-7 zero-on-the-polled-path asymmetry
+ *  is resolved). The optional ``sink`` lets the router report a
+ *  rejected TC as an FDIR anomaly without depending on FDIR. */
 typedef struct {
     uint16_t apid;            /**< APID this AP receives on and emits with. */
     uint16_t tm_seq_count;    /**< Shared CCSDS TM sequence count (mod 2^14). */
     migris_pus1_ctx_t pus1;   /**< PUS-1 per-subtype message counters. */
     migris_pus17_ctx_t pus17; /**< PUS-17 message counter. */
     migris_pus3_ctx_t pus3;   /**< PUS-3 housekeeping report message counter. */
+    migris_pus5_ctx_t pus5;   /**< PUS-5 per-severity message counters. */
     /** TCs addressed to this AP that passed acceptance. Owned and
      *  advanced by ``migris_tc_router_dispatch``; reported in the
      *  framework PUS-3 housekeeping structure. */
@@ -86,6 +93,14 @@ typedef struct {
      *  field before each dispatch / spontaneous report; the router only
      *  reads it into a PUS-3[25] report. */
     uint32_t rx_ring_overflow_drops;
+    /** Optional FDIR event sink. When non-NULL, a TC addressed to this
+     *  AP that fails acceptance is additionally reported as a
+     *  spontaneous PUS-5 anomaly through this sink (the router only
+     *  enqueues; the buffer owner drains and emits it). NULL — the
+     *  zero-initialised default — means no FDIR consumer is wired and
+     *  the router emits nothing extra, so callers that do not use FDIR
+     *  are unaffected. */
+    const migris_event_sink_t* sink;
 } migris_tc_router_ctx_t;
 
 /** Result of the generic accept-stage validation. ``addressed`` is 0

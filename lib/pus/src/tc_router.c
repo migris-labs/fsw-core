@@ -15,10 +15,12 @@
 
 #include "migris/fsw/pus/tc_router.h"
 
+#include "migris/fsw/event_sink.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
-#include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus17.h"
+#include "migris/fsw/pus/pus3.h"
+#include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/pus_tc.h"
 
 #include <stddef.h>
@@ -109,11 +111,10 @@ void migris_tc_accept(const uint8_t* tc,
  * unknown SID — all surface to ground as UNKNOWN_SUBTYPE since the
  * structure ID space is the addressable unit here).
  *
- * The PUS-5 message counters are reported as zero on this path: the
- * router does not own the PUS-5 context. Hoisting it in is the
- * deferred "FDIR raises events from inside the router" abstraction
- * (see pus5.h); the application's spontaneous report carries the live
- * PUS-5 counters. */
+ * As of slice fsw-8 the router owns the PUS-5 context, so this polled
+ * report carries the *live* PUS-5 message counters — identical to the
+ * spontaneous periodic report. The fsw-7 zero-on-the-polled-path
+ * asymmetry is resolved (see docs/wire/pus-3.md). */
 static int router_pus3_oneshot(migris_tc_router_ctx_t* ctx,
                                const migris_tc_accept_result_t* v,
                                uint32_t now_seconds,
@@ -130,20 +131,19 @@ static int router_pus3_oneshot(migris_tc_router_ctx_t* ctx,
     /* accept() verified tc_len equals the declared total and is at
      * least MIGRIS_TC_ROUTER_MIN_TC (primary + TC sec + CRC), so
      * app_off + 2 <= tc_len and this subtraction cannot underflow. */
-    const size_t app_off =
-        MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE;
+    const size_t app_off = MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE;
     const size_t app_len = tc_len - app_off - 2U;
     if (app_len != MIGRIS_PUS3_POLL_TC_APP_DATA_SIZE) {
         *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
         return 0;
     }
-    const migris_pus3_sid_t sid = (migris_pus3_sid_t)(((uint16_t)tc[app_off] << 8) |
-                                                      (uint16_t)tc[app_off + 1U]);
+    const migris_pus3_sid_t sid =
+        (migris_pus3_sid_t)(((uint16_t)tc[app_off] << 8) | (uint16_t)tc[app_off + 1U]);
 
     migris_pus3_hk_params_t p;
     for (size_t i = 0U; i < 4U; ++i) {
         p.pus1_msg_counter[i] = ctx->pus1.msg_counter[i];
-        p.pus5_msg_counter[i] = 0U;
+        p.pus5_msg_counter[i] = ctx->pus5.msg_counter[i];
     }
     p.pus17_tm_msg_counter = ctx->pus17.tm_msg_counter;
     p.tc_accepted_count = ctx->tc_accepted_count;
@@ -212,6 +212,36 @@ static int router_route(migris_tc_router_ctx_t* ctx,
     }
 }
 
+/* Report a TC that failed acceptance as a spontaneous FDIR anomaly,
+ * through the injected event sink (if any). The router only enqueues;
+ * it never emits the PUS-5 itself. This is independent of the PUS-1
+ * ack flags by design: PUS-1 is solicited verification (silent when
+ * not requested), a PUS-5 anomaly is spontaneous FDIR telemetry (a bad
+ * command arrived, regardless of whether it asked to be ack'd) — see
+ * docs/wire/pus-5.md. Auxiliary data is the PUS-1 failure code, then
+ * the TC's service type and subtype (both 0 on a length error, where
+ * the secondary header was not parseable). Extracted as a separate
+ * function so the sink null-check and aux build stay out of
+ * migris_tc_router_dispatch's cognitive-complexity budget. */
+static void router_report_rejection(const migris_tc_router_ctx_t* ctx,
+                                    uint32_t now_seconds,
+                                    const migris_tc_accept_result_t* v) {
+    if (ctx->sink == NULL || ctx->sink->report == NULL) {
+        return;
+    }
+    const uint8_t aux[3] = {
+        (uint8_t)v->fc,
+        v->service_type,
+        v->service_subtype,
+    };
+    (void)ctx->sink->report(ctx->sink->self,
+                            now_seconds,
+                            MIGRIS_PUS5_SEV_LOW,
+                            MIGRIS_PUS5_EVT_TC_REJECTED,
+                            aux,
+                            sizeof aux);
+}
+
 int migris_tc_router_dispatch(migris_tc_router_ctx_t* ctx,
                               uint32_t now_seconds,
                               const uint8_t* tc,
@@ -255,8 +285,10 @@ int migris_tc_router_dispatch(migris_tc_router_ctx_t* ctx,
 
     /* Length error: ack flags are not trustworthy, so a malformed
      * command addressed to this AP is always reported. No routing, no
-     * completion. */
+     * completion. The FDIR anomaly is ungated (spontaneous telemetry,
+     * not solicited verification). */
     if (v.fc == MIGRIS_PUS1_FC_LENGTH_ERROR) {
+        router_report_rejection(ctx, now_seconds, &v);
         const int n = migris_pus1_build_acceptance(&ctx->pus1,
                                                    ctx->apid,
                                                    &ctx->tm_seq_count,
@@ -273,8 +305,12 @@ int migris_tc_router_dispatch(migris_tc_router_ctx_t* ctx,
     }
 
     /* Other acceptance-stage failure (CRC / PUS version / unknown
-     * service): report only if requested, then stop. */
+     * service): the PUS-1 report is gated by the ack flag, but the
+     * FDIR anomaly is not — a rejected command is a detected
+     * condition regardless of whether it requested verification, so a
+     * no-ack rejected TC stays PUS-1-silent yet still raises PUS-5. */
     if (v.fc != MIGRIS_PUS1_FC_NONE) {
+        router_report_rejection(ctx, now_seconds, &v);
         if ((v.ack_flags & MIGRIS_PUS_TC_ACK_ACCEPTANCE) != 0U) {
             const int n = migris_pus1_build_acceptance(&ctx->pus1,
                                                        ctx->apid,

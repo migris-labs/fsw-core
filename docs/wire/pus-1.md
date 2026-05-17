@@ -88,6 +88,20 @@ One inbound TC therefore yields 0–3 packets, written back-to-back on
 the wire (e.g. `PUS-1[1] · PUS-17[2] · PUS-1[7]`). The shared per-APID
 sequence count makes the burst strictly monotonic across services.
 
+### Independent of PUS-1: the fsw-8 FDIR anomaly
+
+The "silence" in rules 1–3 is about **PUS-1 verification only**, not
+about all telemetry. From slice fsw-8, a TC that fails acceptance
+(rules 2 and 3) *additionally* triggers a spontaneous PUS-5[2]
+`TC_REJECTED` FDIR anomaly. That anomaly is **not gated by the ack
+flags**: it is detected-condition telemetry, not solicited
+verification, and it is emitted asynchronously (drained from the FDIR
+event FIFO by the buffer owner *after* this TC's PUS-1 burst, so the
+ack — if any — precedes it on the wire). A no-ack rejected TC
+therefore stays **PUS-1-silent** (rule 3 unchanged, byte-for-byte) yet
+still produces a PUS-5[2] anomaly. See [`pus-5.md`](pus-5.md) for the
+anomaly's source data and the full rationale.
+
 ## Failure codes
 
 Serialised as a single byte in the source data of a failure report.
