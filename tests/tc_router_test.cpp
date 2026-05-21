@@ -11,9 +11,11 @@
 
 #include "migris/fsw/datapool/datapool.h"
 #include "migris/fsw/event_sink.h"
+#include "migris/fsw/pktstore/pktstore.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
 #include "migris/fsw/pus/pus11.h"
+#include "migris/fsw/pus/pus15.h"
 #include "migris/fsw/pus/pus17.h"
 #include "migris/fsw/pus/pus20.h"
 #include "migris/fsw/pus/pus3.h"
@@ -968,6 +970,86 @@ TEST(TcRouter, Pus11SummaryReportEmitsScheduleReport) {
     const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
     ASSERT_EQ(tms.size(), 1U);
     EXPECT_EQ(key(tms[0]), pus11_report_key);
+    EXPECT_EQ(tms[0].secondary.destination_id, 0xCAFEU);
+    EXPECT_EQ(tms[0].primary.seq_count, 0U);
+    EXPECT_TRUE(tms[0].crc_ok);
+}
+
+// --- fsw-11: PUS-15 on-board storage (the fifth routed service) --------
+
+constexpr int pus15_report_key =
+    MIGRIS_PUS_SERVICE_STORAGE * 256 + MIGRIS_PUS15_SUBTYPE_STORE_REPORT;
+
+TEST(TcRouterAccept, ClassifiesPus15TcAsAccepted) {
+    migris_tc_accept_result_t r{};
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_STORAGE,
+                              .service_subtype = MIGRIS_PUS15_SUBTYPE_REPORT_REQUEST,
+                              .source_id = 0x55U});
+    migris_tc_accept(tc.data(), tc.size(), test_apid, &r);
+    EXPECT_EQ(r.addressed, 1);
+    EXPECT_EQ(r.fc, MIGRIS_PUS1_FC_NONE);
+    EXPECT_EQ(r.service_type, MIGRIS_PUS_SERVICE_STORAGE);
+    EXPECT_EQ(r.service_subtype, MIGRIS_PUS15_SUBTYPE_REPORT_REQUEST);
+}
+
+TEST(TcRouter, Pus15DisableMutatesStoreAndCompletes) {
+    auto ctx = make_ctx();
+    migris_pktstore_t store{};
+    migris_pktstore_init(&store);  // storage starts enabled
+    ctx.store = &store;
+
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_STORAGE,
+                  .service_subtype = MIGRIS_PUS15_SUBTYPE_DISABLE_STORAGE,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x1234U});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    // Disable emits no service TM — only PUS-1 acceptance + completion.
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_key}));
+    EXPECT_TRUE(tms[0].crc_ok && tms[1].crc_ok);
+    EXPECT_EQ(migris_pktstore_is_enabled(&store), 0);
+}
+
+TEST(TcRouter, Pus15NullStoreFailsCompletion) {
+    auto ctx = make_ctx();  // ctx.store is left NULL
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_STORAGE,
+                  .service_subtype = MIGRIS_PUS15_SUBTYPE_DISABLE_STORAGE,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x9001U});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_fail_key}));
+    EXPECT_EQ(tms[1].failure_code, static_cast<int>(MIGRIS_PUS1_FC_EXEC_FAILURE));
+}
+
+TEST(TcRouter, Pus15ReportEmitsStoreReport) {
+    auto ctx = make_ctx();
+    migris_pktstore_t store{};
+    migris_pktstore_init(&store);
+    ctx.store = &store;
+    // Capture one packet so the report has content to describe.
+    const std::array<std::uint8_t, 8U> pkt{0xEEU, 0xEEU, 0xEEU, 0xEEU, 0xEEU, 0xEEU, 0xEEU, 0xEEU};
+    ASSERT_EQ(migris_pktstore_store(&store, pkt.data(), pkt.size(), 4242U), 1);
+
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_STORAGE,
+                              .service_subtype = MIGRIS_PUS15_SUBTYPE_REPORT_REQUEST,
+                              .source_id = 0xCAFEU});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 1U);
+    EXPECT_EQ(key(tms[0]), pus15_report_key);
     EXPECT_EQ(tms[0].secondary.destination_id, 0xCAFEU);
     EXPECT_EQ(tms[0].primary.seq_count, 0U);
     EXPECT_TRUE(tms[0].crc_ok);

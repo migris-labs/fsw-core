@@ -27,11 +27,13 @@
  * It starts DISABLED — flight-safe: a freshly booted FSW does not
  * autonomously fire a stale schedule until ground enables it.
  *
- * RAM-only and volatile: the schedule is empty after every reboot
- * (non-volatile persistence arrives with the on-board storage slice,
- * PUS-15). Capacity and the per-activity TC size are compile-time
- * constants — freestanding, no malloc. Freestanding C — no Zephyr,
- * no stdlib.
+ * RAM-only and volatile: the schedule is empty after every reboot.
+ * Non-volatile persistence across reset is deferred to a future
+ * non-volatile-storage capability (a flash storage subsystem — the
+ * PUS-15 packet store, lib/pktstore/, is itself RAM-backed and does
+ * not provide it). Capacity and the per-activity TC size are
+ * compile-time constants — freestanding, no malloc. Freestanding C —
+ * no Zephyr, no stdlib.
  *
  * Byte-level specification of the PUS-11 wire: docs/wire/pus-11.md.
  */

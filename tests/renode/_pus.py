@@ -178,6 +178,20 @@ PUS_11_SUBTYPE_SUMMARY_REPORT = 12  # TM, the summary report
 # its telecommand (the same identifier PUS-1 uses).
 SCHEDULE_REQUEST_ID_SIZE = 4
 
+# PUS-15 on-board storage and retrieval (docs/wire/pus-15.md).
+PUS_SERVICE_STORAGE = 15
+PUS_15_SUBTYPE_ENABLE_STORAGE = 1  # TC, enable storage
+PUS_15_SUBTYPE_DISABLE_STORAGE = 2  # TC, disable storage
+PUS_15_SUBTYPE_DOWNLINK_RANGE = 9  # TC, start a by-time retrieval
+PUS_15_SUBTYPE_DELETE_RANGE = 11  # TC, delete content up to a time
+PUS_15_SUBTYPE_REPORT_REQUEST = 12  # TC, report the packet store
+PUS_15_SUBTYPE_STORE_REPORT = 13  # TM, the packet store report
+
+# [15,13] store report source data: enabled(1) + count(2) + oldest(4) + newest(4).
+PUS15_STORE_REPORT_SOURCE_SIZE = 11
+# primary 6 + TM sec 10 + source data 11 + CRC 2.
+PUS15_STORE_REPORT_PACKET_SIZE = 29
+
 
 @dataclass
 class PusTcSecondary:
@@ -457,6 +471,107 @@ def build_pus11_report_tc(
     )
 
 
+def build_pus15_enable_storage_tc(
+    *,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-15[1] enable-storage TC (no application
+    data)."""
+    return build_tc(
+        service_type=PUS_SERVICE_STORAGE,
+        service_subtype=PUS_15_SUBTYPE_ENABLE_STORAGE,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+    )
+
+
+def build_pus15_disable_storage_tc(
+    *,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-15[2] disable-storage TC (no application
+    data)."""
+    return build_tc(
+        service_type=PUS_SERVICE_STORAGE,
+        service_subtype=PUS_15_SUBTYPE_DISABLE_STORAGE,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+    )
+
+
+def build_pus15_downlink_tc(
+    *,
+    from_time: int,
+    to_time: int,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-15[9] start-a-by-time-period-retrieval TC.
+    Application data is the inclusive window: a 4-byte big-endian
+    from-time followed by a 4-byte big-endian to-time."""
+    return build_tc(
+        service_type=PUS_SERVICE_STORAGE,
+        service_subtype=PUS_15_SUBTYPE_DOWNLINK_RANGE,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+        app_data=struct.pack(">II", from_time, to_time),
+    )
+
+
+def build_pus15_delete_tc(
+    *,
+    time_seconds: int,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-15[11] delete-content-up-to-a-time TC.
+    Application data is the 4-byte big-endian cutoff time."""
+    return build_tc(
+        service_type=PUS_SERVICE_STORAGE,
+        service_subtype=PUS_15_SUBTYPE_DELETE_RANGE,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+        app_data=struct.pack(">I", time_seconds),
+    )
+
+
+def build_pus15_report_request_tc(
+    *,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-15[12] report-the-packet-store TC (no
+    application data). The FSW replies with one [15,13] report."""
+    return build_tc(
+        service_type=PUS_SERVICE_STORAGE,
+        service_subtype=PUS_15_SUBTYPE_REPORT_REQUEST,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+    )
+
+
 def split_packets(stream: bytes) -> list[bytes]:
     """Walk a back-to-back TM byte stream into individual CCSDS Space
     Packets using each primary header's Packet Data Length. Trailing
@@ -566,3 +681,32 @@ def decode_pus11_summary_report(tm: DecodedTm) -> list[tuple[int, bytes]]:
         out.append((release_time, request_id))
         pos += 4 + SCHEDULE_REQUEST_ID_SIZE
     return out
+
+
+@dataclass
+class Pus15StoreReport:
+    """A decoded PUS-15[13] packet store report (docs/wire/pus-15.md)."""
+
+    enabled: bool
+    count: int
+    oldest_time: int
+    newest_time: int
+
+
+def decode_pus15_store_report(tm: DecodedTm) -> Pus15StoreReport:
+    """Parse a PUS-15[13] packet store report's 11-byte source data: a
+    1-byte storage-enabled flag, a 2-byte big-endian packet count, and
+    the 4-byte big-endian oldest / newest storage times."""
+    data = tm.source_data
+    if len(data) != PUS15_STORE_REPORT_SOURCE_SIZE:
+        raise ValueError(
+            f"PUS-15[13] source data must be {PUS15_STORE_REPORT_SOURCE_SIZE} "
+            f"bytes, got {len(data)}"
+        )
+    enabled, count, oldest, newest = struct.unpack(">BHII", data)
+    return Pus15StoreReport(
+        enabled=bool(enabled),
+        count=count,
+        oldest_time=oldest,
+        newest_time=newest,
+    )
