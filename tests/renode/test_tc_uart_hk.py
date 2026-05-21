@@ -38,10 +38,14 @@ from _pus import (
     PUS_1_SUBTYPE_COMPLETION_SUCCESS,
     PUS_3_SUBTYPE_HK_PARAM_REPORT,
     PUS_5_SUBTYPE_INFO,
+    PUS_11_SUBTYPE_SUMMARY_REPORT,
+    PUS_17_SUBTYPE_ARE_YOU_ALIVE_TM,
     PUS_20_SUBTYPE_VALUE_REPORT,
     PUS_SERVICE_EVENT_REPORTING,
     PUS_SERVICE_HOUSEKEEPING,
     PUS_SERVICE_ONBOARD_PARAMETER,
+    PUS_SERVICE_SCHEDULING,
+    PUS_SERVICE_TEST,
     PUS_SERVICE_VERIFICATION,
     PUS_VERSION_C,
     PUS3_HK_SOURCE_DATA_SIZE,
@@ -49,8 +53,13 @@ from _pus import (
     SEQ_FLAGS_UNSEGMENTED,
     DecodedTm,
     build_pus3_oneshot_poll_tc,
+    build_pus11_enable_tc,
+    build_pus11_insert_tc,
+    build_pus11_report_tc,
+    build_pus17_are_you_alive_tc,
     build_pus20_report_request_tc,
     build_pus20_set_request_tc,
+    decode_pus11_summary_report,
     decode_pus20_report,
     split_packets,
 )
@@ -308,3 +317,66 @@ def test_pus20_set_retunes_the_live_hk_cadence(tc_hk_running) -> None:  # noqa: 
     _, (a, b) = _collect(uart, widened_cadence, timeout=90.0)
     assert b.primary.seq_count > a.primary.seq_count
     assert a.crc_ok and b.crc_ok
+
+
+def test_pus11_scheduled_telecommand_is_released_and_executed(  # noqa: F811
+    tc_hk_running,
+) -> None:
+    """The slice fsw-10 headline: a PUS-11[4] insert schedules a
+    telecommand; once the schedule is enabled and the release time is
+    reached, the FSW autonomously re-dispatches it through the router.
+    Here the release time is already in the past, so it fires on the
+    next release tick — the released PUS-17[1] yields a PUS-17[2]
+    carrying the scheduled telecommand's source id."""
+    _, uart = tc_hk_running
+
+    uart.send(build_pus11_enable_tc())
+    scheduled = build_pus17_are_you_alive_tc(source_id=0x7711, seq_count=0x0030)
+    # Release time 1 is already in the past — due on the next tick.
+    uart.send(build_pus11_insert_tc(activities=[(1, scheduled)]))
+
+    def find_released_response(tms: list[DecodedTm]):
+        return next(
+            (
+                t
+                for t in tms
+                if t.secondary.service_type == PUS_SERVICE_TEST
+                and t.secondary.service_subtype == PUS_17_SUBTYPE_ARE_YOU_ALIVE_TM
+                and t.secondary.destination_id == 0x7711
+            ),
+            None,
+        )
+
+    _, released = _collect(uart, find_released_response, timeout=60.0)
+    assert released.crc_ok
+
+
+def test_pus11_summary_report_round_trip(tc_hk_running) -> None:  # noqa: F811
+    """A PUS-11[4] insert followed by a PUS-11[11] summary-report
+    request: the [11,12] report lists the activity with its release
+    time and request identifier. The release time is far in the future
+    so the activity is never released before it is reported."""
+    _, uart = tc_hk_running
+
+    scheduled = build_pus17_are_you_alive_tc(source_id=0x4242, seq_count=0x0099)
+    release_time = 0xFFFF0000
+    uart.send(build_pus11_insert_tc(activities=[(release_time, scheduled)]))
+
+    report_source = 0x0088
+    uart.send(build_pus11_report_tc(request_ids=[scheduled[:4]], source_id=report_source))
+
+    def find_report(tms: list[DecodedTm]):
+        return next(
+            (
+                t
+                for t in tms
+                if t.secondary.service_type == PUS_SERVICE_SCHEDULING
+                and t.secondary.service_subtype == PUS_11_SUBTYPE_SUMMARY_REPORT
+                and t.secondary.destination_id == report_source
+            ),
+            None,
+        )
+
+    _, report = _collect(uart, find_report, timeout=60.0)
+    assert report.crc_ok
+    assert decode_pus11_summary_report(report) == [(release_time, scheduled[:4])]

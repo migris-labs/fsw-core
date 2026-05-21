@@ -45,6 +45,15 @@
  * period of 0 disables periodic housekeeping. Wire format is pinned
  * in docs/wire/pus-20.md.
  *
+ * Slice fsw-10 adds an on-board schedule and PUS-11. A routed PUS-11
+ * TC enables / disables the schedule, resets it, inserts time-tagged
+ * telecommands, deletes them, or summary-reports them. Each main-loop
+ * iteration the loop releases at most one activity whose absolute
+ * release time has been reached — re-dispatching its stored TC
+ * through the router exactly as if it had just arrived — so a ground
+ * station can load a pass's commands and let them run autonomously.
+ * Wire format is pinned in docs/wire/pus-11.md.
+ *
  * Single producer (the RX IRQ) and single consumer (main thread)
  * make ring_buf safe without explicit locking. We send TM with
  * blocking ``uart_poll_out`` — this slice has no concurrent TX
@@ -63,10 +72,12 @@
 #include "migris/fsw/datapool/datapool.h"
 #include "migris/fsw/fdir/fdir.h"
 #include "migris/fsw/pus/ccsds.h"
+#include "migris/fsw/pus/pus11.h"
 #include "migris/fsw/pus/pus20.h"
 #include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/tc_router.h"
+#include "migris/fsw/schedule/schedule.h"
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -90,10 +101,10 @@ static const struct device* const uart_dev = DEVICE_DT_GET(UART_NODE);
 #define MIGRIS_FSW_PARAM_HK_PERIOD_SEC 0x0001U
 
 /* Largest TC we will buffer. The biggest in the baseline is a
- * PUS-20[3] set of the maximum eight parameters: 6 + 5 + (1 + 8*6) +
- * 2 = 62 bytes; 96 leaves headroom. A declared length beyond this is
- * treated as desync. */
-#define TC_BUF_SIZE 96U
+ * PUS-11[4] insert carrying scheduled telecommands; 192 admits an
+ * insert of a couple of maximum-size activities. A declared length
+ * beyond this is treated as desync. */
+#define TC_BUF_SIZE 192U
 
 /* Ring-buffer between the UART RX ISR and the main thread. 128 bytes
  * is ~10× a PUS-17[1] TC; comfortably absorbs a burst even with main
@@ -113,6 +124,13 @@ RING_BUF_DECLARE(rx_ring, RX_RING_SIZE);
  * cumulative PUS-3 housekeeping counter and as a PUS-5 RX_OVERFLOW
  * anomaly. */
 static volatile uint32_t rx_ring_overflow_drops;
+
+/* On-board schedule (slice fsw-10). A routed PUS-11 TC inserts
+ * time-tagged telecommands here; the main loop's release tick
+ * dispatches due ones back through the router. File-scope because the
+ * store holds up to MIGRIS_SCHEDULE_CAPACITY telecommands — too large
+ * for the main() stack. */
+static migris_schedule_t schedule;
 
 static void uart_isr(const struct device* dev, void* user_data) {
     ARG_UNUSED(user_data);
@@ -197,6 +215,13 @@ int main(void) {
     migris_datapool_t datapool;
     (void)migris_datapool_init(&datapool, dp_params, sizeof(dp_params) / sizeof(dp_params[0]));
     ctx.datapool = &datapool;
+
+    /* Slice fsw-10: the on-board schedule. A routed PUS-11 TC inserts
+     * time-tagged telecommands; the release tick in the loop below
+     * dispatches due ones. The schedule starts disabled — ground
+     * enables it with a PUS-11[1]. */
+    migris_schedule_init(&schedule);
+    ctx.schedule = &schedule;
 
     uint8_t tc[TC_BUF_SIZE];
     uint8_t out[MIGRIS_TC_ROUTER_MAX_TM];
@@ -307,6 +332,22 @@ int main(void) {
             migris_fdir_drain(&fdir, ctx.apid, &ctx.tm_seq_count, &ctx.pus5, out, sizeof(out));
         if (fdir_n > 0) {
             uart_tx_blocking(uart_dev, out, (size_t)fdir_n);
+        }
+
+        /* Release tick (slice fsw-10): if the schedule is enabled and
+         * an activity is due, dispatch its telecommand through the
+         * router — one per iteration, after the FDIR drain and before
+         * the inbound-TC handling, so each use of `out[]` is fully
+         * transmitted before the next. */
+        uint8_t released[MIGRIS_SCHEDULE_TC_MAX];
+        size_t released_len = 0U;
+        if (migris_schedule_pop_due(
+                &schedule, now_sec, released, sizeof(released), &released_len) == 1) {
+            const int rel_n =
+                migris_tc_router_dispatch(&ctx, now_sec, released, released_len, out, sizeof(out));
+            if (rel_n > 0) {
+                uart_tx_blocking(uart_dev, out, (size_t)rel_n);
+            }
         }
 
         uint8_t b = 0U;
