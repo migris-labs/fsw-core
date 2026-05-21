@@ -12,6 +12,7 @@ set(MIGRIS_FSW_PUS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/pus)
 set(MIGRIS_FSW_FDIR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/fdir)
 set(MIGRIS_FSW_DATAPOOL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/datapool)
 set(MIGRIS_FSW_SCHEDULE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/schedule)
+set(MIGRIS_FSW_PKTSTORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/pktstore)
 
 target_sources(
   app
@@ -24,23 +25,27 @@ target_sources(
           ${MIGRIS_FSW_PUS_DIR}/src/pus17.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus3.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus11.c
+          ${MIGRIS_FSW_PUS_DIR}/src/pus15.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus20.c
           ${MIGRIS_FSW_PUS_DIR}/src/tc_router.c
           ${MIGRIS_FSW_FDIR_DIR}/src/event_fifo.c
           ${MIGRIS_FSW_FDIR_DIR}/src/fdir.c
           ${MIGRIS_FSW_DATAPOOL_DIR}/src/datapool.c
-          ${MIGRIS_FSW_SCHEDULE_DIR}/src/schedule.c)
+          ${MIGRIS_FSW_SCHEDULE_DIR}/src/schedule.c
+          ${MIGRIS_FSW_PKTSTORE_DIR}/src/pktstore.c)
 
 target_include_directories(app PRIVATE ${MIGRIS_FSW_PUS_DIR}/include
                                        ${MIGRIS_FSW_FDIR_DIR}/include
                                        ${MIGRIS_FSW_DATAPOOL_DIR}/include
-                                       ${MIGRIS_FSW_SCHEDULE_DIR}/include)
+                                       ${MIGRIS_FSW_SCHEDULE_DIR}/include
+                                       ${MIGRIS_FSW_PKTSTORE_DIR}/include)
 
 # Size the freestanding event FIFO, the parameter datapool, the
-# schedule store, and the PUS-20 / PUS-11 per-TC bounds from Kconfig.
-# Applied to the whole `app` target (every lib TU above is part of it)
-# so the struct sizes are identical across all sample TUs; the host
-# library build has no such defines and uses the lib defaults.
+# schedule store, the packet store, and the PUS-20 / PUS-11 per-TC
+# bounds from Kconfig. Applied to the whole `app` target (every lib TU
+# above is part of it) so the struct sizes are identical across all
+# sample TUs; the host library build has no such defines and uses the
+# lib defaults.
 target_compile_definitions(
   app
   PRIVATE MIGRIS_FDIR_EVENT_FIFO_CAPACITY=${CONFIG_FSW_FDIR_EVENT_FIFO_CAPACITY}
@@ -48,4 +53,6 @@ target_compile_definitions(
           MIGRIS_PUS20_MAX_PARAMS_PER_TC=${CONFIG_FSW_PUS20_MAX_PARAMS}
           MIGRIS_SCHEDULE_CAPACITY=${CONFIG_FSW_SCHEDULE_CAPACITY}
           MIGRIS_SCHEDULE_TC_MAX=${CONFIG_FSW_SCHEDULE_TC_MAX}
-          MIGRIS_PUS11_MAX_PER_TC=${CONFIG_FSW_PUS11_MAX_PER_TC})
+          MIGRIS_PUS11_MAX_PER_TC=${CONFIG_FSW_PUS11_MAX_PER_TC}
+          MIGRIS_PKTSTORE_CAPACITY=${CONFIG_FSW_PKTSTORE_CAPACITY}
+          MIGRIS_PKTSTORE_PACKET_MAX=${CONFIG_FSW_PKTSTORE_PACKET_MAX})

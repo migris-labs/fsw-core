@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Migris Labs
  *
- * fsw-9 TC reception + verification + FDIR + on-board parameter
- * management sample.
+ * TC reception + verification + FDIR + on-board parameter, schedule
+ * and storage management sample.
  *
  * Boots Zephyr on nucleo_h753zi, emits one spontaneous PUS-5[1]
  * "FSW boot" informative event (the first TM the FSW produces, the
@@ -54,6 +54,16 @@
  * station can load a pass's commands and let them run autonomously.
  * Wire format is pinned in docs/wire/pus-11.md.
  *
+ * Slice fsw-11 adds an on-board packet store and PUS-15. Every live
+ * TM packet the FSW emits is tapped into a RAM-backed circular store
+ * (transmit_tm below); a routed PUS-15 TC enables / disables storage,
+ * reports the store, deletes a time range, or arms a by-time-window
+ * retrieval. Each main-loop iteration drains at most one packet of an
+ * armed retrieval, re-emitting it verbatim — a replay of stored
+ * history, so replayed packets are not tapped back in. The store is
+ * RAM-backed and volatile (empty after a reboot). Wire format is
+ * pinned in docs/wire/pus-15.md.
+ *
  * Single producer (the RX IRQ) and single consumer (main thread)
  * make ring_buf safe without explicit locking. We send TM with
  * blocking ``uart_poll_out`` — this slice has no concurrent TX
@@ -71,8 +81,10 @@
 
 #include "migris/fsw/datapool/datapool.h"
 #include "migris/fsw/fdir/fdir.h"
+#include "migris/fsw/pktstore/pktstore.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus11.h"
+#include "migris/fsw/pus/pus15.h"
 #include "migris/fsw/pus/pus20.h"
 #include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus5.h"
@@ -132,6 +144,14 @@ static volatile uint32_t rx_ring_overflow_drops;
  * for the main() stack. */
 static migris_schedule_t schedule;
 
+/* On-board packet store (slice fsw-11). Every live TM packet the FSW
+ * emits is tapped into this RAM-backed circular buffer by transmit_tm
+ * below; a routed PUS-15 TC arms a by-time retrieval the main loop
+ * drains. File-scope because the store holds up to
+ * MIGRIS_PKTSTORE_CAPACITY packets — far too large for the main()
+ * stack. RAM-only and volatile: empty after every reboot. */
+static migris_pktstore_t store;
+
 static void uart_isr(const struct device* dev, void* user_data) {
     ARG_UNUSED(user_data);
 
@@ -159,6 +179,32 @@ static void uart_isr(const struct device* dev, void* user_data) {
 static void uart_tx_blocking(const struct device* dev, const uint8_t* buf, size_t len) {
     for (size_t i = 0; i < len; ++i) {
         uart_poll_out(dev, buf[i]);
+    }
+}
+
+/* Transmit a live TM burst and tap every packet in it into the
+ * packet store (slice fsw-11). A single inbound TC can yield a burst
+ * of several back-to-back CCSDS packets (acceptance + service +
+ * completion); this walks the burst by each packet's primary-header
+ * Packet Data Length and stores each one verbatim, tagged with
+ * ``store_time``. A packet the store rejects (storage disabled, a
+ * retrieval in progress, or over MIGRIS_PKTSTORE_PACKET_MAX) is
+ * silently skipped — best-effort capture is the contract. Replayed
+ * packets drained from a retrieval go out via plain uart_tx_blocking
+ * instead: a replay of stored history must not be re-stored. */
+static void
+transmit_tm(const struct device* dev, uint32_t store_time, const uint8_t* burst, size_t len) {
+    uart_tx_blocking(dev, burst, len);
+    size_t pos = 0U;
+    while ((pos + MIGRIS_CCSDS_PRIMARY_HEADER_SIZE) <= len) {
+        const uint16_t data_length =
+            (uint16_t)(((uint16_t)burst[pos + 4U] << 8) | (uint16_t)burst[pos + 5U]);
+        const size_t pkt_size = migris_ccsds_packet_total_size(data_length);
+        if ((pos + pkt_size) > len) {
+            break;
+        }
+        (void)migris_pktstore_store(&store, &burst[pos], pkt_size, store_time);
+        pos += pkt_size;
     }
 }
 
@@ -223,6 +269,14 @@ int main(void) {
     migris_schedule_init(&schedule);
     ctx.schedule = &schedule;
 
+    /* Slice fsw-11: the on-board packet store. transmit_tm taps every
+     * live TM packet into it; a routed PUS-15 TC enables / disables
+     * storage, reports it, deletes a time range, or arms a retrieval
+     * the drain tick in the loop below empties. migris_pktstore_init
+     * leaves storage ENABLED, so telemetry is captured from boot. */
+    migris_pktstore_init(&store);
+    ctx.store = &store;
+
     uint8_t tc[TC_BUF_SIZE];
     uint8_t out[MIGRIS_TC_ROUTER_MAX_TM];
     size_t have = 0U;
@@ -250,7 +304,7 @@ int main(void) {
                                                       out,
                                                       sizeof(out));
     if (boot_n > 0) {
-        uart_tx_blocking(uart_dev, out, (size_t)boot_n);
+        transmit_tm(uart_dev, boot_sec, out, (size_t)boot_n);
     }
 
     /* Slice fsw-7: spontaneous periodic PUS-3[25] housekeeping report.
@@ -306,7 +360,7 @@ int main(void) {
                                                          out,
                                                          sizeof(out));
             if (hk_n > 0) {
-                uart_tx_blocking(uart_dev, out, (size_t)hk_n);
+                transmit_tm(uart_dev, now_sec, out, (size_t)hk_n);
             }
             last_hk_emit_sec = now_sec;
         }
@@ -331,7 +385,7 @@ int main(void) {
         const int fdir_n =
             migris_fdir_drain(&fdir, ctx.apid, &ctx.tm_seq_count, &ctx.pus5, out, sizeof(out));
         if (fdir_n > 0) {
-            uart_tx_blocking(uart_dev, out, (size_t)fdir_n);
+            transmit_tm(uart_dev, now_sec, out, (size_t)fdir_n);
         }
 
         /* Release tick (slice fsw-10): if the schedule is enabled and
@@ -346,8 +400,23 @@ int main(void) {
             const int rel_n =
                 migris_tc_router_dispatch(&ctx, now_sec, released, released_len, out, sizeof(out));
             if (rel_n > 0) {
-                uart_tx_blocking(uart_dev, out, (size_t)rel_n);
+                transmit_tm(uart_dev, now_sec, out, (size_t)rel_n);
             }
+        }
+
+        /* Retrieval drain (slice fsw-11): a routed PUS-15[9] downlink
+         * arms a by-time-window retrieval; here, one stored packet in
+         * the window is re-emitted verbatim per iteration — a replay
+         * of stored history, so it goes out via plain uart_tx_blocking
+         * and is NOT tapped back into the store. It reuses `out[]`
+         * (fully transmitted before the next use, like every other
+         * burst) and is drained after the schedule release and before
+         * the inbound-TC handling. While a retrieval is active the
+         * store is frozen, so transmit_tm's taps above are no-ops
+         * until the window is exhausted. */
+        size_t replay_len = 0U;
+        if (migris_pktstore_retrieve_next(&store, out, sizeof(out), &replay_len) == 1) {
+            uart_tx_blocking(uart_dev, out, replay_len);
         }
 
         uint8_t b = 0U;
@@ -382,7 +451,7 @@ int main(void) {
             ctx.rx_ring_overflow_drops = rx_ring_overflow_drops;
             const int rc = migris_tc_router_dispatch(&ctx, now_sec, tc, have, out, sizeof(out));
             if (rc > 0) {
-                uart_tx_blocking(uart_dev, out, (size_t)rc);
+                transmit_tm(uart_dev, now_sec, out, (size_t)rc);
             }
             /* Done with this TC regardless of the verdict — reset for
              * the next packet. */

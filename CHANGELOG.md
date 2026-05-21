@@ -8,6 +8,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-11: on-board packet store + PUS-15 storage and
+  retrieval.** The framework's first mass-memory primitive — the
+  produce-on-orbit / downlink-next-pass model a spacecraft needs
+  because it makes telemetry continuously but has a ground contact
+  only during a pass. A new freestanding C subtree `lib/pktstore/`
+  (with its own C-friendly `.clang-tidy`) holds a bounded, static,
+  **circular** packet store: every telemetry packet kept verbatim with
+  the FSW-clock second it was stored, oldest first, and when full a new
+  packet overwrites the **oldest** so the most recent telemetry is
+  always retained. **PUS-15** (`lib/pus/pus15.{h,c}`) is the
+  ground-facing face: a pragmatic core subset over one predefined
+  packet store — enable [15,1] / disable [15,2] storage, start a
+  by-time-window retrieval [15,9], delete content up to a time [15,11],
+  and the store report [15,12] → [15,13]. PUS-15 is wired into the
+  router as the **fifth** routable service (accept gate + the fsw-9
+  dispatch table; a `migris_pus15_ctx_t` and a nullable
+  `migris_pktstore_t* store` in the router context, NULL = no store = a
+  routed PUS-15 TC fails its completion stage). The `tc_uart` sample
+  taps **every** live TM packet it emits into the store (a new
+  `transmit_tm` helper, splitting each burst into CCSDS packets) and,
+  each main-loop iteration, drains at most one packet of an armed
+  retrieval — re-emitting it verbatim. New host suites
+  `tests/pktstore_test.cpp` and `tests/pus15_test.cpp`;
+  `tests/tc_router_test.cpp` extended; `tests/renode/test_tc_uart_hk.py`
+  gains a store-report round-trip, a downlink-replays-stored-TM
+  closed-loop, and a disable/re-enable state round-trip. Wire format
+  pinned in [`docs/wire/pus-15.md`](docs/wire/pus-15.md). Scoped
+  decisions:
+  - **RAM-backed and volatile — *not* non-volatile.** This is the
+    "on-board storage slice" the fsw-9 and fsw-10 entries named as
+    where parameter / schedule persistence "arrives", but PUS-15
+    storage is a between-passes **RAM** buffer: the store is empty
+    after every reboot. Non-volatile mass memory that survives a reset
+    is a separate future capability — it needs a flash storage
+    subsystem — and stays deferred. The `datapool.h` and `schedule.h`
+    header comments that pointed at PUS-15 for persistence are
+    corrected to point at that future non-volatile-storage capability.
+    *Trigger to revisit*: the first slice that needs telemetry,
+    parameters, or a schedule to survive a power cycle.
+  - **One predefined packet store.** Dynamic packet-store creation /
+    deletion / configuration, storage-selection management (which
+    packets a store captures), and the packet-store catalogue are
+    **deferred** — one predefined store covers the model. *Trigger to
+    revisit*: a second concurrent store with distinct retention.
+  - **A downlink arms; the main loop drains.** [15,9] does not itself
+    emit telemetry — it arms an at-most-one by-time retrieval the
+    application drains one packet per iteration, re-emitting each
+    stored packet with its original headers (a replay of history). No
+    separate execution engine — the same "re-dispatched, not specially
+    executed" shape fsw-10 used for the schedule.
+  - **The store freezes during a retrieval.** While a retrieval is in
+    progress, storage and [15,11] delete are suspended / rejected so
+    the buffer cannot shift under the retrieval cursor.
+  - **Summary report, not content.** [15,13] is a fixed 11-byte
+    store summary (enabled, count, oldest / newest time). Chunked
+    bulk downlink of the stored packets themselves is "large data"
+    and pairs with **PUS-13** (the next slice).
 - **Slice fsw-10: on-board schedule + PUS-11 time-based scheduling.**
   The framework's first scheduling primitive — time-tagged
   telecommands that execute autonomously, with no continuous ground

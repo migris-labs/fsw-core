@@ -36,9 +36,12 @@
  *
  * The store is RAM-only and volatile: parameters reset to their
  * initial values whenever ``migris_datapool_init`` runs (on every
- * reboot). Non-volatile persistence across reset is deferred to the
- * on-board storage slice (PUS-15). Capacity is a compile-time constant
- * — freestanding, no malloc. Freestanding C — no Zephyr, no stdlib.
+ * reboot). Non-volatile persistence across reset is deferred to a
+ * future non-volatile-storage capability (a flash storage subsystem —
+ * note that the PUS-15 packet store, lib/pktstore/, is itself
+ * RAM-backed and does not provide it). Capacity is a compile-time
+ * constant — freestanding, no malloc. Freestanding C — no Zephyr, no
+ * stdlib.
  *
  * Byte-level specification of the value codec: docs/wire/pus-20.md.
  */

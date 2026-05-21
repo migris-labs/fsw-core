@@ -97,3 +97,31 @@ config FSW_PUS11_MAX_PER_TC
 	  definition; it bounds the worst-case [11,12] packet. Capped at 8
 	  here because the TC router output buffer (MIGRIS_TC_ROUTER_MAX_TM,
 	  a fixed 128) is sized for that worst case.
+
+config FSW_PKTSTORE_CAPACITY
+	int "On-board packet store capacity (packets)"
+	default 32
+	range 4 256
+	help
+	  Number of telemetry packets the on-board packet store can hold
+	  before it overwrites the oldest. Wired into the freestanding lib
+	  via the MIGRIS_PKTSTORE_CAPACITY compile definition so flight and
+	  host builds size the store identically. The store is RAM-backed
+	  and volatile — it is empty after every reboot. Storage is
+	  CAPACITY x (PACKET_MAX + a little overhead) bytes of BSS; the
+	  default (32) is a few KB on the H7 and absorbs a pass's worth of
+	  housekeeping plus verification telemetry.
+
+config FSW_PKTSTORE_PACKET_MAX
+	int "On-board packet store per-packet size (bytes)"
+	default 128
+	range 80 128
+	help
+	  Largest telemetry packet, in bytes, one packet-store entry can
+	  hold. Wired into the freestanding lib via the
+	  MIGRIS_PKTSTORE_PACKET_MAX compile definition. A larger packet is
+	  refused by migris_pktstore_store and skipped by the transmit_tm
+	  tap. Capped at 128 because the retrieval drain re-emits a stored
+	  packet through the shared 128-byte router output buffer
+	  (MIGRIS_TC_ROUTER_MAX_TM); the floor (80) stays clear of the
+	  largest baseline TM packet (a PUS-20[2] value report).

@@ -39,27 +39,35 @@ from _pus import (
     PUS_3_SUBTYPE_HK_PARAM_REPORT,
     PUS_5_SUBTYPE_INFO,
     PUS_11_SUBTYPE_SUMMARY_REPORT,
+    PUS_15_SUBTYPE_STORE_REPORT,
     PUS_17_SUBTYPE_ARE_YOU_ALIVE_TM,
     PUS_20_SUBTYPE_VALUE_REPORT,
     PUS_SERVICE_EVENT_REPORTING,
     PUS_SERVICE_HOUSEKEEPING,
     PUS_SERVICE_ONBOARD_PARAMETER,
     PUS_SERVICE_SCHEDULING,
+    PUS_SERVICE_STORAGE,
     PUS_SERVICE_TEST,
     PUS_SERVICE_VERIFICATION,
     PUS_VERSION_C,
     PUS3_HK_SOURCE_DATA_SIZE,
     PUS3_SID_FRAMEWORK_DIAG,
+    PUS15_STORE_REPORT_SOURCE_SIZE,
     SEQ_FLAGS_UNSEGMENTED,
     DecodedTm,
     build_pus3_oneshot_poll_tc,
     build_pus11_enable_tc,
     build_pus11_insert_tc,
     build_pus11_report_tc,
+    build_pus15_disable_storage_tc,
+    build_pus15_downlink_tc,
+    build_pus15_enable_storage_tc,
+    build_pus15_report_request_tc,
     build_pus17_are_you_alive_tc,
     build_pus20_report_request_tc,
     build_pus20_set_request_tc,
     decode_pus11_summary_report,
+    decode_pus15_store_report,
     decode_pus20_report,
     split_packets,
 )
@@ -380,3 +388,124 @@ def test_pus11_summary_report_round_trip(tc_hk_running) -> None:  # noqa: F811
     _, report = _collect(uart, find_report, timeout=60.0)
     assert report.crc_ok
     assert decode_pus11_summary_report(report) == [(release_time, scheduled[:4])]
+
+
+# Mirrors Kconfig FSW_PKTSTORE_CAPACITY for the tc_uart sample — the
+# on-board packet store wraps after this many packets, overwriting the
+# oldest. Kept here so the count bound is legible next to the assertion.
+PKTSTORE_CAPACITY = 32
+
+
+def test_pus15_store_report_round_trip(tc_hk_running) -> None:  # noqa: F811
+    """A PUS-15[12] report request yields a well-formed [15,13] packet
+    store report: storage enabled (the post-boot default), at least the
+    boot event captured, a non-decreasing oldest..newest span, and a
+    count bounded by the store capacity."""
+    _, uart = tc_hk_running
+
+    report_source = 0x0015
+    uart.send(build_pus15_report_request_tc(source_id=report_source))
+
+    def find_report(tms: list[DecodedTm]):
+        return next(
+            (
+                t
+                for t in tms
+                if t.secondary.service_type == PUS_SERVICE_STORAGE
+                and t.secondary.service_subtype == PUS_15_SUBTYPE_STORE_REPORT
+                and t.secondary.destination_id == report_source
+            ),
+            None,
+        )
+
+    tms, report = _collect(uart, find_report, timeout=60.0)
+    _assert_boot_first(tms)
+
+    assert report.primary.type == PACKET_TYPE_TM
+    assert report.primary.apid == FSW_APID
+    assert report.secondary.pus_version == PUS_VERSION_C
+    assert len(report.source_data) == PUS15_STORE_REPORT_SOURCE_SIZE
+    assert report.crc_ok
+
+    store = decode_pus15_store_report(report)
+    assert store.enabled  # storage starts enabled at boot
+    assert 1 <= store.count <= PKTSTORE_CAPACITY
+    assert store.oldest_time <= store.newest_time
+
+
+def test_pus15_downlink_retrieves_stored_tm(tc_hk_running) -> None:  # noqa: F811
+    """The slice fsw-11 headline: every TM the FSW emits is tapped into
+    the on-board packet store, and a PUS-15[9] by-time-window downlink
+    replays it verbatim. Live telemetry draws a strictly monotonic
+    per-APID sequence count; a retrieval re-emits stored packets with
+    their original (older, lower) counts. A sequence-count regression on
+    the stream is therefore unambiguous proof of a replay — and it does
+    not depend on any one stored packet surviving circular overwrite
+    before the retrieval is armed."""
+    _, uart = tc_hk_running
+
+    # Let the store capture the boot event plus a housekeeping report,
+    # then arm a retrieval over the whole representable time range.
+    _collect(
+        uart,
+        lambda ts: ts if any(_is_hk(t) for t in ts) else None,
+        timeout=60.0,
+    )
+    uart.send(build_pus15_downlink_tc(from_time=0, to_time=0xFFFFFFFF))
+
+    def find_replay(tms: list[DecodedTm]):
+        running_max = -1
+        for t in tms:
+            if t.primary.seq_count < running_max:
+                return t  # a sequence regression — a replayed packet
+            running_max = max(running_max, t.primary.seq_count)
+        return None
+
+    _, replay = _collect(uart, find_replay, timeout=60.0)
+    # The replayed packet is one the FSW emitted earlier, re-sent intact
+    # end to end: a TM Space Packet on this AP with a valid CRC.
+    assert replay.primary.type == PACKET_TYPE_TM
+    assert replay.primary.apid == FSW_APID
+    assert replay.crc_ok
+
+
+def test_pus15_disable_then_reenable_round_trips_storage_state(  # noqa: F811
+    tc_hk_running,
+) -> None:
+    """PUS-15[2] suspends packet capture and PUS-15[1] resumes it; each
+    state change is observable in a subsequent [15,13] store report. The
+    two report requests carry distinct source ids so the disabled and
+    re-enabled reports are told apart on the running stream — the FSW
+    processes the four telecommands strictly in arrival order, so the
+    first report is built while storage is off and the second while it
+    is back on."""
+    _, uart = tc_hk_running
+
+    disabled_source = 0x00D5
+    enabled_source = 0x00E5
+    uart.send(build_pus15_disable_storage_tc())
+    uart.send(build_pus15_report_request_tc(source_id=disabled_source))
+    uart.send(build_pus15_enable_storage_tc())
+    uart.send(build_pus15_report_request_tc(source_id=enabled_source))
+
+    def find_for(source_id: int):
+        def predicate(tms: list[DecodedTm]):
+            return next(
+                (
+                    t
+                    for t in tms
+                    if t.secondary.service_type == PUS_SERVICE_STORAGE
+                    and t.secondary.service_subtype == PUS_15_SUBTYPE_STORE_REPORT
+                    and t.secondary.destination_id == source_id
+                ),
+                None,
+            )
+
+        return predicate
+
+    _, disabled_report = _collect(uart, find_for(disabled_source), timeout=60.0)
+    _, enabled_report = _collect(uart, find_for(enabled_source), timeout=60.0)
+
+    assert disabled_report.crc_ok and enabled_report.crc_ok
+    assert not decode_pus15_store_report(disabled_report).enabled
+    assert decode_pus15_store_report(enabled_report).enabled

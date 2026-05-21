@@ -19,6 +19,7 @@
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
 #include "migris/fsw/pus/pus11.h"
+#include "migris/fsw/pus/pus15.h"
 #include "migris/fsw/pus/pus17.h"
 #include "migris/fsw/pus/pus20.h"
 #include "migris/fsw/pus/pus3.h"
@@ -99,7 +100,8 @@ void migris_tc_accept(const uint8_t* tc,
     if (sec.service_type != MIGRIS_PUS_SERVICE_TEST &&
         sec.service_type != MIGRIS_PUS_SERVICE_HOUSEKEEPING &&
         sec.service_type != MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER &&
-        sec.service_type != MIGRIS_PUS_SERVICE_SCHEDULING) {
+        sec.service_type != MIGRIS_PUS_SERVICE_SCHEDULING &&
+        sec.service_type != MIGRIS_PUS_SERVICE_STORAGE) {
         out->fc = MIGRIS_PUS1_FC_UNKNOWN_SERVICE;
         return;
     }
@@ -316,6 +318,50 @@ static int router_pus11(migris_tc_router_ctx_t* ctx,
     return 0;
 }
 
+/* PUS-15 handler — on-board storage. Reads the TC application data; a
+ * [15,1]/[2]/[9]/[11] returns 0 (no TM, completion success), a
+ * [15,12] report returns the TM byte count. A [15,9] downlink only
+ * arms a retrieval — the main loop drains it. If no packet store is
+ * wired on this AP the TC fails its completion stage. */
+static int router_pus15(migris_tc_router_ctx_t* ctx,
+                        const migris_tc_accept_result_t* v,
+                        uint32_t now_seconds,
+                        const uint8_t* tc,
+                        size_t tc_len,
+                        uint8_t* out,
+                        size_t out_cap,
+                        migris_pus1_failure_code_t* exec_fc) {
+    if (ctx->store == NULL) {
+        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+        return 0;
+    }
+    const size_t app_off = MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE;
+    const size_t app_len = tc_len - app_off - 2U;
+    const int rc = migris_pus15_execute(&ctx->pus15,
+                                        ctx->store,
+                                        ctx->apid,
+                                        &ctx->tm_seq_count,
+                                        now_seconds,
+                                        v->service_subtype,
+                                        v->source_id,
+                                        &tc[app_off],
+                                        app_len,
+                                        out,
+                                        out_cap);
+    if (rc > 0) {
+        return rc;
+    }
+    if (rc == MIGRIS_PUS15_OK) {
+        return 0; /* enable / disable / downlink / delete — no TM */
+    }
+    if (rc == MIGRIS_PUS15_ERR_BAD_SUBTYPE) {
+        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
+    } else {
+        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+    }
+    return 0;
+}
+
 /* Service-type → handler dispatch table. migris_tc_accept rejects
  * every service type absent from this table, so a routed (accepted)
  * TC always matches an entry. */
@@ -329,6 +375,7 @@ static const router_dispatch_entry_t router_dispatch_table[] = {
     {MIGRIS_PUS_SERVICE_HOUSEKEEPING, router_pus3_oneshot},
     {MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER, router_pus20},
     {MIGRIS_PUS_SERVICE_SCHEDULING, router_pus11},
+    {MIGRIS_PUS_SERVICE_STORAGE, router_pus15},
 };
 
 /* Route an accepted TC to its service handler. Returns the bytes
