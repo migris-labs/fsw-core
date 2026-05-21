@@ -89,8 +89,7 @@ static int pus20_report(migris_pus20_ctx_t* ctx,
 
     /* data_length = (data field bytes) − 1; the data field is the TM
      * secondary header + source data + the 2-byte CRC. */
-    const uint16_t data_field =
-        (uint16_t)(MIGRIS_PUS_TM_SECONDARY_HEADER_SIZE + source_data + 2U);
+    const uint16_t data_field = (uint16_t)(MIGRIS_PUS_TM_SECONDARY_HEADER_SIZE + source_data + 2U);
     const size_t packet_size = MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + (size_t)data_field;
     if (out_cap < packet_size) {
         return MIGRIS_PUS20_ERR_BUF_TOO_SMALL;

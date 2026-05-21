@@ -31,9 +31,8 @@ constexpr std::uint16_t test_source_id = 0xCAFEU;
 // Source-data offset: primary (6) + PUS-C TM secondary (10).
 constexpr std::size_t udf = MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TM_SECONDARY_HEADER_SIZE;
 
-migris_dp_param_t param(migris_dp_param_id_t id,
-                        migris_dp_access_t access,
-                        migris_dp_value_t value) {
+migris_dp_param_t
+param(migris_dp_param_id_t id, migris_dp_access_t access, migris_dp_value_t value) {
     migris_dp_param_t out{};
     out.id = id;
     out.access = access;
@@ -71,8 +70,8 @@ std::vector<std::uint8_t> report_app(const std::vector<std::uint16_t>& ids) {
 }
 
 // [20,3] application data: 1-byte count + (2-byte ID, value) pairs.
-std::vector<std::uint8_t> set_app(
-    const std::vector<std::pair<std::uint16_t, migris_dp_value_t>>& items) {
+std::vector<std::uint8_t>
+set_app(const std::vector<std::pair<std::uint16_t, migris_dp_value_t>>& items) {
     std::vector<std::uint8_t> app;
     app.push_back(static_cast<std::uint8_t>(items.size()));
     for (const auto& item : items) {
@@ -163,8 +162,8 @@ TEST(Pus20, ReportRequestAtMaxParamsFitsTheBoundedPacket) {
     migris_datapool_t dp = make_pool();
     migris_pus20_ctx_t ctx{};
     std::uint16_t seq = 0U;
-    const auto app = report_app(
-        {0x0001U, 0x0002U, 0x0003U, 0x0004U, 0x0005U, 0x0006U, 0x0007U, 0x0008U});
+    const auto app =
+        report_app({0x0001U, 0x0002U, 0x0003U, 0x0004U, 0x0005U, 0x0006U, 0x0007U, 0x0008U});
     std::array<std::uint8_t, MIGRIS_PUS20_TM_MAX_PACKET_SIZE> tm{};
 
     const int rc = migris_pus20_execute(&ctx,
@@ -263,8 +262,8 @@ TEST(Pus20, SetRequestAppliesEveryWriteAndEmitsNoTelemetry) {
     migris_datapool_t dp = make_pool();
     migris_pus20_ctx_t ctx{};
     std::uint16_t seq = 9U;
-    const auto app = set_app({{0x0001U, migris_dp_u32(0x55667788U)},
-                              {0x0005U, migris_dp_i16(1234)}});
+    const auto app =
+        set_app({{0x0001U, migris_dp_u32(0x55667788U)}, {0x0005U, migris_dp_i16(1234)}});
     std::array<std::uint8_t, MIGRIS_PUS20_TM_MAX_PACKET_SIZE> tm{};
 
     EXPECT_EQ(migris_pus20_execute(&ctx,
@@ -279,7 +278,7 @@ TEST(Pus20, SetRequestAppliesEveryWriteAndEmitsNoTelemetry) {
                                    tm.data(),
                                    tm.size()),
               MIGRIS_PUS20_OK);
-    EXPECT_EQ(seq, 9U);                 // no report → no sequence advance
+    EXPECT_EQ(seq, 9U);  // no report → no sequence advance
     EXPECT_EQ(ctx.msg_counter[0], 0U);
 
     migris_dp_value_t got{};
@@ -294,8 +293,7 @@ TEST(Pus20, SetRequestIsAtomicWhenAnIdIsUnknown) {
     migris_pus20_ctx_t ctx{};
     std::uint16_t seq = 0U;
     // First item is valid, second names an undefined parameter.
-    const auto app = set_app({{0x0001U, migris_dp_u32(0xFFFFFFFFU)},
-                              {0x0999U, migris_dp_u32(0U)}});
+    const auto app = set_app({{0x0001U, migris_dp_u32(0xFFFFFFFFU)}, {0x0999U, migris_dp_u32(0U)}});
     std::array<std::uint8_t, MIGRIS_PUS20_TM_MAX_PACKET_SIZE> tm{};
 
     EXPECT_EQ(migris_pus20_execute(&ctx,
@@ -322,8 +320,7 @@ TEST(Pus20, SetRequestRejectsReadOnlyWithoutSideEffects) {
     migris_pus20_ctx_t ctx{};
     std::uint16_t seq = 0U;
     // 0x0008 is read-only; the valid 0x0001 write must be rolled back with it.
-    const auto app =
-        set_app({{0x0001U, migris_dp_u32(7U)}, {0x0008U, migris_dp_u32(7U)}});
+    const auto app = set_app({{0x0001U, migris_dp_u32(7U)}, {0x0008U, migris_dp_u32(7U)}});
     std::array<std::uint8_t, MIGRIS_PUS20_TM_MAX_PACKET_SIZE> tm{};
 
     EXPECT_EQ(migris_pus20_execute(&ctx,
@@ -385,8 +382,7 @@ TEST(Pus20, SetRequestRepeatedIdIsLastWriterWins) {
     migris_datapool_t dp = make_pool();
     migris_pus20_ctx_t ctx{};
     std::uint16_t seq = 0U;
-    const auto app =
-        set_app({{0x0001U, migris_dp_u32(111U)}, {0x0001U, migris_dp_u32(222U)}});
+    const auto app = set_app({{0x0001U, migris_dp_u32(111U)}, {0x0001U, migris_dp_u32(222U)}});
     std::array<std::uint8_t, MIGRIS_PUS20_TM_MAX_PACKET_SIZE> tm{};
 
     ASSERT_EQ(migris_pus20_execute(&ctx,

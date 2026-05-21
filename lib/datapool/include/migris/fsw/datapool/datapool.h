@@ -85,10 +85,7 @@ typedef enum {
 
 /** Access policy of a parameter. A read-only parameter is reported by
  *  PUS-20[1] but rejects a PUS-20[3] set. */
-typedef enum {
-    MIGRIS_DP_ACCESS_READ_ONLY = 0,
-    MIGRIS_DP_ACCESS_READ_WRITE = 1
-} migris_dp_access_t;
+typedef enum { MIGRIS_DP_ACCESS_READ_ONLY = 0, MIGRIS_DP_ACCESS_READ_WRITE = 1 } migris_dp_access_t;
 
 /** A typed parameter value — the framework's first tagged-union
  *  variant. ``type`` selects the active ``as`` member. Construct one
@@ -100,6 +97,7 @@ typedef enum {
  *  never holds a pointer into application memory. */
 typedef struct {
     migris_dp_type_t type;
+
     union {
         uint8_t u8;
         uint16_t u16;
@@ -200,8 +198,7 @@ int migris_datapool_init(migris_datapool_t* dp, const migris_dp_param_t* params,
 /** Find the parameter with ID ``id``. Returns a borrowed pointer into
  *  ``dp`` (valid while ``dp`` lives and is not re-initialised), or NULL
  *  if no such parameter exists or ``dp`` is NULL. */
-const migris_dp_param_t* migris_datapool_find(const migris_datapool_t* dp,
-                                              migris_dp_param_id_t id);
+const migris_dp_param_t* migris_datapool_find(const migris_datapool_t* dp, migris_dp_param_id_t id);
 
 /** Read the current value of parameter ``id`` into ``*out``. Returns
  *  ``MIGRIS_DATAPOOL_OK``, ``MIGRIS_DATAPOOL_ERR_NOT_FOUND``, or

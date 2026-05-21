@@ -703,9 +703,8 @@ TEST(TcRouter, PartiallyInitialisedSinkIsSafe) {
 constexpr int pus20_report_key =
     MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER * 256 + MIGRIS_PUS20_SUBTYPE_VALUE_REPORT;
 
-migris_dp_param_t dp_param(migris_dp_param_id_t id,
-                           migris_dp_access_t access,
-                           migris_dp_value_t value) {
+migris_dp_param_t
+dp_param(migris_dp_param_id_t id, migris_dp_access_t access, migris_dp_value_t value) {
     migris_dp_param_t out{};
     out.id = id;
     out.access = access;
@@ -857,13 +856,12 @@ TEST(TcRouter, Pus20MaxReportBurstFitsRouterBuffer) {
     ASSERT_EQ(migris_datapool_init(&dp, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
     ctx.datapool = &dp;
 
-    const auto tc =
-        build_tc({.service_type = MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER,
-                  .service_subtype = MIGRIS_PUS20_SUBTYPE_REPORT_REQUEST,
-                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
-                  .source_id = 0x1234U},
-                 pus20_report_app(
-                     {0x0001U, 0x0002U, 0x0003U, 0x0004U, 0x0005U, 0x0006U, 0x0007U, 0x0008U}));
+    const auto tc = build_tc(
+        {.service_type = MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER,
+         .service_subtype = MIGRIS_PUS20_SUBTYPE_REPORT_REQUEST,
+         .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+         .source_id = 0x1234U},
+        pus20_report_app({0x0001U, 0x0002U, 0x0003U, 0x0004U, 0x0005U, 0x0006U, 0x0007U, 0x0008U}));
     std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
 
     const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());

@@ -20,9 +20,8 @@ namespace {
 
 // Build a parameter without touching the value union directly (the
 // constructors do that, in datapool.c).
-migris_dp_param_t param(migris_dp_param_id_t id,
-                        migris_dp_access_t access,
-                        migris_dp_value_t value) {
+migris_dp_param_t
+param(migris_dp_param_id_t id, migris_dp_access_t access, migris_dp_value_t value) {
     migris_dp_param_t out{};
     out.id = id;
     out.access = access;
@@ -177,8 +176,7 @@ TEST(Datapool, ValueEncodeRejectsSmallBufferAndBadType) {
     bad.type = static_cast<migris_dp_type_t>(42);
     std::array<std::uint8_t, 4U> buf{};
     EXPECT_EQ(migris_dp_value_encode(&bad, buf.data(), buf.size()), MIGRIS_DATAPOOL_ERR_TYPE);
-    EXPECT_EQ(migris_dp_value_encode(nullptr, buf.data(), buf.size()),
-              MIGRIS_DATAPOOL_ERR_BAD_ARG);
+    EXPECT_EQ(migris_dp_value_encode(nullptr, buf.data(), buf.size()), MIGRIS_DATAPOOL_ERR_BAD_ARG);
 }
 
 TEST(Datapool, ValueDecodeRejectsShortInputAndBadType) {

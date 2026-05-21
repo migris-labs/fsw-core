@@ -68,8 +68,7 @@ extern "C" {
  *  TM sec header (10) + 1-byte count + N pairs of (2-byte ID + 4-byte
  *  value, the widest type) + CRC (2). Equals 19 + 6*N. The TC router
  *  sizes its output buffer so this fits alongside the PUS-1 reports. */
-#define MIGRIS_PUS20_TM_MAX_PACKET_SIZE \
-    (6U + 10U + 1U + (MIGRIS_PUS20_MAX_PARAMS_PER_TC * 6U) + 2U)
+#define MIGRIS_PUS20_TM_MAX_PACKET_SIZE (6U + 10U + 1U + (MIGRIS_PUS20_MAX_PARAMS_PER_TC * 6U) + 2U)
 
 /** PUS-20 handler return / error codes. Same convention as the rest of
  *  the codec: a positive value is the byte count written, 0 is success
