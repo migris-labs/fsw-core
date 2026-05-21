@@ -16,8 +16,8 @@
  *      PUS-1[1] (accepted) or PUS-1[2] (failed, with code). On an
  *      acceptance failure the TC is not routed and there is no
  *      completion report.
- *   3. Route an accepted TC to its service handler (PUS-17 today),
- *      which may emit its own TM.
+ *   3. Route an accepted TC to its service handler (PUS-17, PUS-3 or
+ *      PUS-20), which may emit its own TM.
  *   4. If the TC requested it (ACK_COMPLETION), emit a PUS-1[7]
  *      (success) or PUS-1[8] (failure, with code).
  *
@@ -35,6 +35,7 @@
 #include "migris/fsw/event_sink.h"
 #include "migris/fsw/pus/pus1.h"
 #include "migris/fsw/pus/pus17.h"
+#include "migris/fsw/pus/pus20.h"
 #include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/pus_tc.h"
@@ -49,12 +50,13 @@ extern "C" {
 /** Upper bound on the bytes one inbound TC can produce. The largest
  *  single-TC burst is a PUS-1[1] acceptance report (22) + the routed
  *  service response + a PUS-1[7] completion report (22). The biggest
- *  service response is a PUS-3[25] housekeeping parameter report (47,
- *  vs PUS-17[2]'s 18), so the worst case is 22 + 47 + 22 = 91, rounded
- *  up for headroom. The caller's output buffer must be at least this
- *  large; the router checks once up front so no individual report can
- *  run out of space mid-burst. */
-#define MIGRIS_TC_ROUTER_MAX_TM 96U
+ *  service response is a PUS-20[2] parameter value report (67 for the
+ *  maximum eight parameters, vs PUS-3[25]'s 47 and PUS-17[2]'s 18), so
+ *  the worst case is 22 + 67 + 22 = 111, rounded up to 128. The
+ *  caller's output buffer must be at least this large; the router
+ *  checks once up front so no individual report can run out of space
+ *  mid-burst. */
+#define MIGRIS_TC_ROUTER_MAX_TM 128U
 
 /** TC router return / error codes. A non-negative return value from
  *  ``migris_tc_router_dispatch`` is the number of TM bytes written
@@ -80,6 +82,7 @@ typedef struct {
     migris_pus17_ctx_t pus17; /**< PUS-17 message counter. */
     migris_pus3_ctx_t pus3;   /**< PUS-3 housekeeping report message counter. */
     migris_pus5_ctx_t pus5;   /**< PUS-5 per-severity message counters. */
+    migris_pus20_ctx_t pus20; /**< PUS-20 parameter value report message counter. */
     /** TCs addressed to this AP that passed acceptance. Owned and
      *  advanced by ``migris_tc_router_dispatch``; reported in the
      *  framework PUS-3 housekeeping structure. */
@@ -101,6 +104,13 @@ typedef struct {
      *  the router emits nothing extra, so callers that do not use FDIR
      *  are unaffected. */
     const migris_event_sink_t* sink;
+    /** On-board parameter datapool, reached by a routed PUS-20 TC.
+     *  Caller-owned and borrowed (the router never copies it), held by
+     *  pointer exactly like ``sink``. NULL — the zero-initialised
+     *  default — means no datapool is wired on this AP: a routed
+     *  PUS-20 TC then fails its completion stage with FC_EXEC_FAILURE,
+     *  so callers that do not use PUS-20 are unaffected. */
+    migris_datapool_t* datapool;
 } migris_tc_router_ctx_t;
 
 /** Result of the generic accept-stage validation. ``addressed`` is 0

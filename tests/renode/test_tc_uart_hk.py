@@ -22,6 +22,7 @@ under ``lib/pus/`` — the two meet only on the wire.
 
 from __future__ import annotations
 
+import struct
 import time
 
 import pytest
@@ -29,14 +30,18 @@ import pytest
 from _pus import (
     ACK_ACCEPTANCE,
     ACK_COMPLETION,
+    DP_PARAM_HK_PERIOD_SEC,
+    DP_TYPE_U32,
     FSW_APID,
     PACKET_TYPE_TM,
     PUS_1_SUBTYPE_ACCEPTANCE_SUCCESS,
     PUS_1_SUBTYPE_COMPLETION_SUCCESS,
     PUS_3_SUBTYPE_HK_PARAM_REPORT,
     PUS_5_SUBTYPE_INFO,
+    PUS_20_SUBTYPE_VALUE_REPORT,
     PUS_SERVICE_EVENT_REPORTING,
     PUS_SERVICE_HOUSEKEEPING,
+    PUS_SERVICE_ONBOARD_PARAMETER,
     PUS_SERVICE_VERIFICATION,
     PUS_VERSION_C,
     PUS3_HK_SOURCE_DATA_SIZE,
@@ -44,6 +49,9 @@ from _pus import (
     SEQ_FLAGS_UNSEGMENTED,
     DecodedTm,
     build_pus3_oneshot_poll_tc,
+    build_pus20_report_request_tc,
+    build_pus20_set_request_tc,
+    decode_pus20_report,
     split_packets,
 )
 from conftest import _RENODE_BIN, _TC_HK_ELF, tc_hk_running  # noqa: F401
@@ -230,3 +238,73 @@ def test_rx_overflow_counter_zero_under_nominal_traffic(tc_hk_running) -> None: 
     )
     rx_drops = int.from_bytes(hk.source_data[25:29], "big")
     assert rx_drops == 0, hk.source_data.hex()
+
+
+# The period a PUS-20[3] set retunes the housekeeping cadence to —
+# distinct from this build's HK_PERIOD_SEC (2) so a post-set cadence is
+# unambiguous on the wire (a pre-set pair can never be this far apart).
+NEW_HK_PERIOD_SEC = 4
+
+
+def test_pus20_set_then_report_round_trips_the_hk_period(  # noqa: F811
+    tc_hk_running,
+) -> None:
+    """A PUS-20[3] set of the housekeeping-period datapool parameter is
+    reflected by a subsequent PUS-20[1] report — the new value lands in
+    the datapool on real emulated hardware."""
+    _, uart = tc_hk_running
+
+    report_source = 0x0066
+    uart.send(
+        build_pus20_set_request_tc(
+            params=[(DP_PARAM_HK_PERIOD_SEC, struct.pack(">I", NEW_HK_PERIOD_SEC))]
+        )
+    )
+    uart.send(
+        build_pus20_report_request_tc(
+            param_ids=[DP_PARAM_HK_PERIOD_SEC], source_id=report_source
+        )
+    )
+
+    def find_report(tms: list[DecodedTm]):
+        for t in tms:
+            if (
+                t.secondary.service_type == PUS_SERVICE_ONBOARD_PARAMETER
+                and t.secondary.service_subtype == PUS_20_SUBTYPE_VALUE_REPORT
+                and t.secondary.destination_id == report_source
+            ):
+                return t
+        return None
+
+    _, report = _collect(uart, find_report, timeout=60.0)
+    assert report.crc_ok
+    values = decode_pus20_report(report, {DP_PARAM_HK_PERIOD_SEC: DP_TYPE_U32})
+    period = int.from_bytes(values[DP_PARAM_HK_PERIOD_SEC], "big")
+    assert period == NEW_HK_PERIOD_SEC
+
+
+def test_pus20_set_retunes_the_live_hk_cadence(tc_hk_running) -> None:  # noqa: F811
+    """The slice fsw-9 headline: a PUS-20[3] set retunes the running
+    housekeeping cadence with no rebuild. After the period is widened
+    from this build's 2 s to NEW_HK_PERIOD_SEC, a pair of consecutive
+    spontaneous PUS-3[25] reports spaced by the new period appears on
+    the FSW clock — a spacing that cannot occur pre-set."""
+    _, uart = tc_hk_running
+
+    uart.send(
+        build_pus20_set_request_tc(
+            params=[(DP_PARAM_HK_PERIOD_SEC, struct.pack(">I", NEW_HK_PERIOD_SEC))]
+        )
+    )
+
+    def widened_cadence(tms: list[DecodedTm]):
+        hk = [t for t in tms if _is_hk(t)]
+        for a, b in zip(hk, hk[1:]):
+            delta = b.secondary.time_seconds - a.secondary.time_seconds
+            if NEW_HK_PERIOD_SEC <= delta <= NEW_HK_PERIOD_SEC + 1:
+                return (a, b)
+        return None
+
+    _, (a, b) = _collect(uart, widened_cadence, timeout=90.0)
+    assert b.primary.seq_count > a.primary.seq_count
+    assert a.crc_ok and b.crc_ok

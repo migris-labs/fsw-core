@@ -2,7 +2,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Migris Labs
  *
- * fsw-8 TC reception + verification + FDIR event reporting sample.
+ * fsw-9 TC reception + verification + FDIR + on-board parameter
+ * management sample.
  *
  * Boots Zephyr on nucleo_h753zi, emits one spontaneous PUS-5[1]
  * "FSW boot" informative event (the first TM the FSW produces, the
@@ -35,6 +36,15 @@
  * anomaly on the wire). The FIFO is single-context: every producer
  * runs in the main loop; the RX ISR only bumps its own counter.
  *
+ * Slice fsw-9 adds an on-board parameter datapool and PUS-20. The
+ * datapool holds the PUS-3 housekeeping period as a read-write
+ * parameter (framework ID 0x0001), seeded from Kconfig; a routed
+ * PUS-20 TC reports it ([20,1]) or sets it ([20,3]). The main loop
+ * reads the period from the datapool every iteration, so a PUS-20[3]
+ * set reconfigures the housekeeping cadence live, with no rebuild — a
+ * period of 0 disables periodic housekeeping. Wire format is pinned
+ * in docs/wire/pus-20.md.
+ *
  * Single producer (the RX IRQ) and single consumer (main thread)
  * make ring_buf safe without explicit locking. We send TM with
  * blocking ``uart_poll_out`` — this slice has no concurrent TX
@@ -50,8 +60,10 @@
  * ASM one layer down, not on the Space Packet layer.
  */
 
+#include "migris/fsw/datapool/datapool.h"
 #include "migris/fsw/fdir/fdir.h"
 #include "migris/fsw/pus/ccsds.h"
+#include "migris/fsw/pus/pus20.h"
 #include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/tc_router.h"
@@ -72,11 +84,16 @@ static const struct device* const uart_dev = DEVICE_DT_GET(UART_NODE);
  * application process; downstream missions allocate their own. */
 #define MIGRIS_FSW_APID 0x100U
 
-/* Largest TC we will buffer. Comfortably above the only TC in the
- * baseline (PUS-17[1] is 13 bytes) with headroom for near-future
- * small commands; a declared length beyond this is treated as
- * desync. */
-#define TC_BUF_SIZE 64U
+/* Framework datapool parameter IDs (reserved range 0x0001..0x00FF —
+ * see docs/wire/pus-20.md). This sample registers exactly one: the
+ * PUS-3 housekeeping period, made operator-tunable via PUS-20. */
+#define MIGRIS_FSW_PARAM_HK_PERIOD_SEC 0x0001U
+
+/* Largest TC we will buffer. The biggest in the baseline is a
+ * PUS-20[3] set of the maximum eight parameters: 6 + 5 + (1 + 8*6) +
+ * 2 = 62 bytes; 96 leaves headroom. A declared length beyond this is
+ * treated as desync. */
+#define TC_BUF_SIZE 96U
 
 /* Ring-buffer between the UART RX ISR and the main thread. 128 bytes
  * is ~10× a PUS-17[1] TC; comfortably absorbs a burst even with main
@@ -166,6 +183,21 @@ int main(void) {
     const migris_event_sink_t fdir_sink = migris_fdir_event_sink(&fdir);
     ctx.sink = &fdir_sink;
 
+    /* Slice fsw-9: the on-board parameter datapool. fsw-core hard-codes
+     * no parameters — the application supplies the set. This sample
+     * registers one: the PUS-3 housekeeping period, made operator-
+     * tunable through PUS-20, seeded from Kconfig. The descriptor set
+     * is a fixed, compile-time-correct constant (one read-write u32
+     * parameter), so the init cannot fail. */
+    const migris_dp_param_t dp_params[] = {
+        {MIGRIS_FSW_PARAM_HK_PERIOD_SEC,
+         MIGRIS_DP_ACCESS_READ_WRITE,
+         migris_dp_u32((uint32_t)CONFIG_FSW_PUS3_HK_PERIOD_SEC)},
+    };
+    migris_datapool_t datapool;
+    (void)migris_datapool_init(&datapool, dp_params, sizeof(dp_params) / sizeof(dp_params[0]));
+    ctx.datapool = &datapool;
+
     uint8_t tc[TC_BUF_SIZE];
     uint8_t out[MIGRIS_TC_ROUTER_MAX_TM];
     size_t have = 0U;
@@ -223,8 +255,19 @@ int main(void) {
          * every iteration — including the idle path below, where most
          * time is spent. The shared `out[]` is fully transmitted
          * (blocking) before the loop proceeds, so a periodic report
-         * never overlaps a TC-driven burst. */
-        if (now_sec - last_hk_emit_sec >= (uint32_t)CONFIG_FSW_PUS3_HK_PERIOD_SEC) {
+         * never overlaps a TC-driven burst.
+         *
+         * The period is a live-tunable datapool parameter (fsw-9):
+         * re-read every iteration so a PUS-20[3] set reconfigures the
+         * cadence with no rebuild. A period of 0 disables it. */
+        uint32_t hk_period_sec = 0U;
+        migris_dp_value_t hk_period = {0};
+        if (migris_datapool_get(&datapool, MIGRIS_FSW_PARAM_HK_PERIOD_SEC, &hk_period) ==
+                MIGRIS_DATAPOOL_OK &&
+            hk_period.type == MIGRIS_DP_TYPE_U32) {
+            hk_period_sec = migris_dp_as_u32(&hk_period);
+        }
+        if (hk_period_sec != 0U && (now_sec - last_hk_emit_sec) >= hk_period_sec) {
             ctx.rx_ring_overflow_drops = rx_ring_overflow_drops;
             migris_pus3_hk_params_t hp;
             fill_hk_params(&ctx, &hp);

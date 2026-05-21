@@ -68,15 +68,18 @@ target_sources(
           lib/pus/src/pus5.c
           lib/pus/src/pus17.c
           lib/pus/src/pus3.c
+          lib/pus/src/pus20.c
           lib/pus/src/tc_router.c
           lib/fdir/src/event_fifo.c
-          lib/fdir/src/fdir.c)
+          lib/fdir/src/fdir.c
+          lib/datapool/src/datapool.c)
 
 target_include_directories(
   fsw-core
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/pus/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/fdir/include>
+         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/datapool/include>
          $<INSTALL_INTERFACE:include>)
 
 target_compile_features(fsw-core PUBLIC cxx_std_20 c_std_99)
@@ -137,6 +140,12 @@ install(
 
 install(
   DIRECTORY lib/fdir/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING
+  PATTERN "*.h")
+
+install(
+  DIRECTORY lib/datapool/include/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING
   PATTERN "*.h")

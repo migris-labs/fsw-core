@@ -9,10 +9,12 @@
 
 #include "migris/fsw/pus/tc_router.h"
 
+#include "migris/fsw/datapool/datapool.h"
 #include "migris/fsw/event_sink.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
 #include "migris/fsw/pus/pus17.h"
+#include "migris/fsw/pus/pus20.h"
 #include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/pus_tc.h"
@@ -694,6 +696,186 @@ TEST(TcRouter, PartiallyInitialisedSinkIsSafe) {
     const auto tc = build_tc({.corrupt_crc = true});
     std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
     EXPECT_EQ(migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size()), 0);
+}
+
+// --- fsw-9: PUS-20 parameter management (the third routed service) ----
+
+constexpr int pus20_report_key =
+    MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER * 256 + MIGRIS_PUS20_SUBTYPE_VALUE_REPORT;
+
+migris_dp_param_t
+dp_param(migris_dp_param_id_t id, migris_dp_access_t access, migris_dp_value_t value) {
+    migris_dp_param_t out{};
+    out.id = id;
+    out.access = access;
+    out.value = value;
+    return out;
+}
+
+// [20,1] application data: 1-byte count + 2-byte big-endian IDs.
+std::vector<std::uint8_t> pus20_report_app(const std::vector<std::uint16_t>& ids) {
+    std::vector<std::uint8_t> app;
+    app.push_back(static_cast<std::uint8_t>(ids.size()));
+    for (const std::uint16_t id : ids) {
+        app.push_back(static_cast<std::uint8_t>(id >> 8));
+        app.push_back(static_cast<std::uint8_t>(id & 0xFFU));
+    }
+    return app;
+}
+
+// [20,3] application data: count 1 + (2-byte ID, 4-byte u32 value).
+std::vector<std::uint8_t> pus20_set_u32_app(std::uint16_t id, std::uint32_t value) {
+    std::vector<std::uint8_t> app;
+    app.push_back(static_cast<std::uint8_t>(1U));
+    app.push_back(static_cast<std::uint8_t>(id >> 8));
+    app.push_back(static_cast<std::uint8_t>(id & 0xFFU));
+    app.push_back(static_cast<std::uint8_t>(value >> 24));
+    app.push_back(static_cast<std::uint8_t>(value >> 16));
+    app.push_back(static_cast<std::uint8_t>(value >> 8));
+    app.push_back(static_cast<std::uint8_t>(value & 0xFFU));
+    return app;
+}
+
+TEST(TcRouterAccept, ClassifiesPus20ReportRequestAsAccepted) {
+    migris_tc_accept_result_t r{};
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER,
+                              .service_subtype = MIGRIS_PUS20_SUBTYPE_REPORT_REQUEST,
+                              .source_id = 0x55U},
+                             pus20_report_app({0x0001U}));
+    migris_tc_accept(tc.data(), tc.size(), test_apid, &r);
+    EXPECT_EQ(r.addressed, 1);
+    EXPECT_EQ(r.fc, MIGRIS_PUS1_FC_NONE);
+    EXPECT_EQ(r.service_type, MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER);
+    EXPECT_EQ(r.service_subtype, MIGRIS_PUS20_SUBTYPE_REPORT_REQUEST);
+}
+
+TEST(TcRouter, Pus20ReportRequestEmitsValueReport) {
+    auto ctx = make_ctx();
+    const std::array<migris_dp_param_t, 1U> defs{
+        dp_param(0x0001U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_u32(0xABCDEF01U))};
+    migris_datapool_t dp{};
+    ASSERT_EQ(migris_datapool_init(&dp, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
+    ctx.datapool = &dp;
+
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER,
+                              .service_subtype = MIGRIS_PUS20_SUBTYPE_REPORT_REQUEST,
+                              .source_id = 0xCAFEU},
+                             pus20_report_app({0x0001U}));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 1U);
+    EXPECT_EQ(key(tms[0]), pus20_report_key);
+    EXPECT_EQ(tms[0].secondary.destination_id, 0xCAFEU);
+    EXPECT_EQ(tms[0].primary.seq_count, 0U);
+    EXPECT_TRUE(tms[0].crc_ok);
+}
+
+TEST(TcRouter, Pus20SetRequestMutatesDatapoolAndCompletes) {
+    auto ctx = make_ctx();
+    const std::array<migris_dp_param_t, 1U> defs{
+        dp_param(0x0001U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_u32(100U))};
+    migris_datapool_t dp{};
+    ASSERT_EQ(migris_datapool_init(&dp, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
+    ctx.datapool = &dp;
+
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER,
+                  .service_subtype = MIGRIS_PUS20_SUBTYPE_SET_REQUEST,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x1234U},
+                 pus20_set_u32_app(0x0001U, 0xDEADBEEFU));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    // A [20,3] set emits no service TM — only PUS-1 acceptance + completion.
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_key}));
+    EXPECT_TRUE(tms[0].crc_ok && tms[1].crc_ok);
+
+    migris_dp_value_t got{};
+    ASSERT_EQ(migris_datapool_get(&dp, 0x0001U, &got), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_dp_as_u32(&got), 0xDEADBEEFU);
+}
+
+TEST(TcRouter, Pus20NullDatapoolFailsCompletion) {
+    auto ctx = make_ctx();  // ctx.datapool is left NULL
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER,
+                  .service_subtype = MIGRIS_PUS20_SUBTYPE_REPORT_REQUEST,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x9001U},
+                 pus20_report_app({0x0001U}));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 2U);  // accepted, no report, completion failure
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_fail_key}));
+    EXPECT_EQ(tms[1].failure_code, static_cast<int>(MIGRIS_PUS1_FC_EXEC_FAILURE));
+}
+
+TEST(TcRouter, Pus20UnknownIdAcceptedButCompletionFails) {
+    auto ctx = make_ctx();
+    const std::array<migris_dp_param_t, 1U> defs{
+        dp_param(0x0001U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_u32(1U))};
+    migris_datapool_t dp{};
+    ASSERT_EQ(migris_datapool_init(&dp, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
+    ctx.datapool = &dp;
+
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER,
+                  .service_subtype = MIGRIS_PUS20_SUBTYPE_REPORT_REQUEST,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x9001U},
+                 pus20_report_app({0x0999U}));  // 0x0999 is undefined
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_fail_key}));
+    EXPECT_EQ(tms[1].failure_code, static_cast<int>(MIGRIS_PUS1_FC_EXEC_FAILURE));
+}
+
+TEST(TcRouter, Pus20MaxReportBurstFitsRouterBuffer) {
+    auto ctx = make_ctx();
+    // Eight f32 parameters → the worst-case [20,2] report (67 bytes).
+    std::array<migris_dp_param_t, 8U> defs{};
+    for (std::size_t i = 0U; i < defs.size(); ++i) {
+        defs[i] = dp_param(static_cast<migris_dp_param_id_t>(0x0001U + i),
+                           MIGRIS_DP_ACCESS_READ_WRITE,
+                           migris_dp_f32(1.0F));
+    }
+    migris_datapool_t dp{};
+    ASSERT_EQ(migris_datapool_init(&dp, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
+    ctx.datapool = &dp;
+
+    const auto tc = build_tc(
+        {.service_type = MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER,
+         .service_subtype = MIGRIS_PUS20_SUBTYPE_REPORT_REQUEST,
+         .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+         .source_id = 0x1234U},
+        pus20_report_app({0x0001U, 0x0002U, 0x0003U, 0x0004U, 0x0005U, 0x0006U, 0x0007U, 0x0008U}));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    // 22 (accept) + 67 (8×f32 report) + 22 (completion) = 111 — proves
+    // the MIGRIS_TC_ROUTER_MAX_TM 96 → 128 bump.
+    ASSERT_EQ(n,
+              static_cast<int>(MIGRIS_PUS1_SUCCESS_TM_PACKET_SIZE +
+                               MIGRIS_PUS20_TM_MAX_PACKET_SIZE +
+                               MIGRIS_PUS1_SUCCESS_TM_PACKET_SIZE));
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 3U);
+    EXPECT_EQ((std::array<int, 3>{key(tms[0]), key(tms[1]), key(tms[2])}),
+              (std::array<int, 3>{pus1_accept_key, pus20_report_key, pus1_complete_key}));
+    EXPECT_TRUE(tms[0].crc_ok && tms[1].crc_ok && tms[2].crc_ok);
 }
 
 }  // namespace

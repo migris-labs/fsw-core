@@ -3,8 +3,10 @@ sample:
   description: >-
     Zephyr application that listens on USART3 for a CCSDS Space
     Packet, runs it through the TC router (PUS-1 verification +
-    PUS-17 service routing), and writes the resulting TM stream
-    back on the same UART. Used by the Renode round-trip smoke
+    PUS-17 / PUS-3 / PUS-20 service routing), and writes the
+    resulting TM stream back on the same UART. Carries an on-board
+    parameter datapool whose PUS-3 housekeeping period is
+    live-tunable via PUS-20. Used by the Renode round-trip smoke
     test in tests/renode/.
 tests:
   sample.fsw-core.tc_uart:

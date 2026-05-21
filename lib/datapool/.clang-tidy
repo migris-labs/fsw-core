@@ -1,0 +1,45 @@
+---
+# Migris fsw-core — clang-tidy override for the freestanding C parameter
+# datapool (typed parameter store + big-endian value codec).
+#
+# `lib/datapool/` is C source compiled by both the Zephyr cross
+# toolchain (Cortex-M7) and the host C++ toolchain (linked into
+# migris::fsw-core for unit testing) — identical dual-use to `lib/pus/`
+# and `lib/fdir/`, so the same rule adjustments apply:
+#
+#   * Headers use <stdint.h> / <stddef.h>, not <cstdint> / <cstddef>:
+#     the C side cannot include the C++ headers. Silence
+#     hicpp / modernize "deprecated headers" checks here.
+#   * Typedefs and enum constants follow the C convention (snake_case
+#     ending in `_t`, UPPER_CASE for enum constants and macros). The
+#     parent config's CamelCase typedef rule is a C++ rule and does
+#     not apply to the C ABI surface.
+#   * The datapool's typed value (`migris_dp_value_t`) is a tagged
+#     union — the idiomatic variant type in freestanding C99, which has
+#     no `std::variant`. `cppcoreguidelines-pro-type-union-access` is a
+#     C++ guideline ("use std::variant instead") with no C equivalent.
+#     Union access is confined to datapool.c (the typed constructors,
+#     accessors and the value codec); the tag discipline is enforced
+#     there, so silence the check for this C ABI surface.
+
+InheritParentConfig: true
+
+# Constrain clang-tidy to lib/ headers when checking the C TUs in this
+# directory — keeps the C ABI surface analysed without polluting C++ TU
+# diagnostics from other directories.
+HeaderFilterRegex: '^lib/.*'
+
+Checks: >
+  -hicpp-deprecated-headers,
+  -modernize-deprecated-headers,
+  -modernize-macro-to-enum,
+  -bugprone-macro-parentheses,
+  -cppcoreguidelines-pro-type-union-access
+
+CheckOptions:
+  - { key: readability-identifier-naming.TypedefCase,                value: lower_case }
+  - { key: readability-identifier-naming.TypedefSuffix,              value: _t          }
+  - { key: readability-identifier-naming.EnumCase,                   value: lower_case }
+  - { key: readability-identifier-naming.EnumSuffix,                 value: _t          }
+  - { key: readability-identifier-naming.EnumConstantCase,           value: UPPER_CASE }
+  - { key: readability-identifier-naming.StructCase,                 value: lower_case }
