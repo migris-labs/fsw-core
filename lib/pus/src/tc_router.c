@@ -184,14 +184,14 @@ static int router_pus3_oneshot(migris_tc_router_ctx_t* ctx,
  * The function-pointer table replaces the service-type switch as of
  * slice fsw-9 — the "earned at a third independent service" point
  * fsw-7 pinned, PUS-20 being that third routable service. */
-typedef int (*router_handler_fn)(migris_tc_router_ctx_t* ctx,
-                                 const migris_tc_accept_result_t* v,
-                                 uint32_t now_seconds,
-                                 const uint8_t* tc,
-                                 size_t tc_len,
-                                 uint8_t* out,
-                                 size_t out_cap,
-                                 migris_pus1_failure_code_t* exec_fc);
+typedef int (*router_handler_t)(migris_tc_router_ctx_t* ctx,
+                                const migris_tc_accept_result_t* v,
+                                uint32_t now_seconds,
+                                const uint8_t* tc,
+                                size_t tc_len,
+                                uint8_t* out,
+                                size_t out_cap,
+                                migris_pus1_failure_code_t* exec_fc);
 
 /* PUS-17 handler — the are-you-alive connection test carries no
  * application data, so `tc`/`tc_len` are unused here. */
@@ -275,7 +275,7 @@ static int router_pus20(migris_tc_router_ctx_t* ctx,
  * TC always matches an entry. */
 typedef struct {
     uint8_t service_type;
-    router_handler_fn handler;
+    router_handler_t handler;
 } router_dispatch_entry_t;
 
 static const router_dispatch_entry_t router_dispatch_table[] = {

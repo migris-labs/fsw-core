@@ -29,6 +29,12 @@ param(migris_dp_param_id_t id, migris_dp_access_t access, migris_dp_value_t valu
     return out;
 }
 
+// An undefined parameter type. 7 is inside migris_dp_type_t's
+// representational range (the largest defined enumerator is 6) but is
+// not a defined type — GCC's -Wconversion rejects a literal outside
+// that range, so this is the sentinel for the "unknown type" paths.
+constexpr migris_dp_type_t bad_type = static_cast<migris_dp_type_t>(7);
+
 // Encode `v`, decode the bytes back as `v.type`, and require the
 // decoded value to re-encode to the identical bytes — bit-exact and
 // type-agnostic (no float `==`).
@@ -56,7 +62,7 @@ TEST(Datapool, TypeWidthMatchesTheWireContract) {
     EXPECT_EQ(migris_dp_type_width(MIGRIS_DP_TYPE_U32), 4U);
     EXPECT_EQ(migris_dp_type_width(MIGRIS_DP_TYPE_I32), 4U);
     EXPECT_EQ(migris_dp_type_width(MIGRIS_DP_TYPE_F32), 4U);
-    EXPECT_EQ(migris_dp_type_width(static_cast<migris_dp_type_t>(99)), 0U);
+    EXPECT_EQ(migris_dp_type_width(bad_type), 0U);
 }
 
 TEST(Datapool, ConstructorsAndAccessorsRoundTrip) {
@@ -173,7 +179,7 @@ TEST(Datapool, ValueEncodeRejectsSmallBufferAndBadType) {
               MIGRIS_DATAPOOL_ERR_BUF_TOO_SMALL);
 
     migris_dp_value_t bad{};
-    bad.type = static_cast<migris_dp_type_t>(42);
+    bad.type = bad_type;
     std::array<std::uint8_t, 4U> buf{};
     EXPECT_EQ(migris_dp_value_encode(&bad, buf.data(), buf.size()), MIGRIS_DATAPOOL_ERR_TYPE);
     EXPECT_EQ(migris_dp_value_encode(nullptr, buf.data(), buf.size()), MIGRIS_DATAPOOL_ERR_BAD_ARG);
@@ -184,7 +190,7 @@ TEST(Datapool, ValueDecodeRejectsShortInputAndBadType) {
     const std::array<std::uint8_t, 2U> two{0x01U, 0x02U};
     EXPECT_EQ(migris_dp_value_decode(&v, MIGRIS_DP_TYPE_U32, two.data(), two.size()),
               MIGRIS_DATAPOOL_ERR_BUF_TOO_SMALL);
-    EXPECT_EQ(migris_dp_value_decode(&v, static_cast<migris_dp_type_t>(42), two.data(), two.size()),
+    EXPECT_EQ(migris_dp_value_decode(&v, bad_type, two.data(), two.size()),
               MIGRIS_DATAPOOL_ERR_TYPE);
     EXPECT_EQ(migris_dp_value_decode(nullptr, MIGRIS_DP_TYPE_U16, two.data(), two.size()),
               MIGRIS_DATAPOOL_ERR_BAD_ARG);
@@ -239,7 +245,7 @@ TEST(Datapool, InitRejectsDuplicateIds) {
 
 TEST(Datapool, InitRejectsOutOfRangeType) {
     migris_dp_param_t bad = param(0x0001U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_u8(0U));
-    bad.value.type = static_cast<migris_dp_type_t>(77);
+    bad.value.type = bad_type;
     migris_datapool_t dp{};
     EXPECT_EQ(migris_datapool_init(&dp, &bad, 1U), MIGRIS_DATAPOOL_ERR_TYPE);
     EXPECT_EQ(dp.count, 0U);
