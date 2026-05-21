@@ -13,12 +13,14 @@
 #include "migris/fsw/event_sink.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
+#include "migris/fsw/pus/pus11.h"
 #include "migris/fsw/pus/pus17.h"
 #include "migris/fsw/pus/pus20.h"
 #include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/pus_tc.h"
 #include "migris/fsw/pus/pus_tm.h"
+#include "migris/fsw/schedule/schedule.h"
 
 #include <gtest/gtest.h>
 
@@ -876,6 +878,99 @@ TEST(TcRouter, Pus20MaxReportBurstFitsRouterBuffer) {
     EXPECT_EQ((std::array<int, 3>{key(tms[0]), key(tms[1]), key(tms[2])}),
               (std::array<int, 3>{pus1_accept_key, pus20_report_key, pus1_complete_key}));
     EXPECT_TRUE(tms[0].crc_ok && tms[1].crc_ok && tms[2].crc_ok);
+}
+
+// --- fsw-10: PUS-11 scheduling (the fourth routed service) ------------
+
+constexpr int pus11_report_key =
+    MIGRIS_PUS_SERVICE_SCHEDULING * 256 + MIGRIS_PUS11_SUBTYPE_SUMMARY_REPORT;
+
+// [11,11] application data: 1-byte count + 4-byte request ids.
+std::vector<std::uint8_t> pus11_id_list_app(const std::vector<std::array<std::uint8_t, 4U>>& ids) {
+    std::vector<std::uint8_t> app;
+    app.push_back(static_cast<std::uint8_t>(ids.size()));
+    for (const auto& id : ids) {
+        app.insert(app.end(), id.begin(), id.end());
+    }
+    return app;
+}
+
+TEST(TcRouterAccept, ClassifiesPus11TcAsAccepted) {
+    migris_tc_accept_result_t r{};
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_SCHEDULING,
+                              .service_subtype = MIGRIS_PUS11_SUBTYPE_ENABLE,
+                              .source_id = 0x55U});
+    migris_tc_accept(tc.data(), tc.size(), test_apid, &r);
+    EXPECT_EQ(r.addressed, 1);
+    EXPECT_EQ(r.fc, MIGRIS_PUS1_FC_NONE);
+    EXPECT_EQ(r.service_type, MIGRIS_PUS_SERVICE_SCHEDULING);
+    EXPECT_EQ(r.service_subtype, MIGRIS_PUS11_SUBTYPE_ENABLE);
+}
+
+TEST(TcRouter, Pus11EnableMutatesScheduleAndCompletes) {
+    auto ctx = make_ctx();
+    migris_schedule_t sched{};
+    migris_schedule_init(&sched);
+    ctx.schedule = &sched;
+
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_SCHEDULING,
+                  .service_subtype = MIGRIS_PUS11_SUBTYPE_ENABLE,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x1234U});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    // Enable emits no service TM — only PUS-1 acceptance + completion.
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_key}));
+    EXPECT_TRUE(tms[0].crc_ok && tms[1].crc_ok);
+    EXPECT_EQ(migris_schedule_is_enabled(&sched), 1);
+}
+
+TEST(TcRouter, Pus11NullScheduleFailsCompletion) {
+    auto ctx = make_ctx();  // ctx.schedule is left NULL
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_SCHEDULING,
+                  .service_subtype = MIGRIS_PUS11_SUBTYPE_ENABLE,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x9001U});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_fail_key}));
+    EXPECT_EQ(tms[1].failure_code, static_cast<int>(MIGRIS_PUS1_FC_EXEC_FAILURE));
+}
+
+TEST(TcRouter, Pus11SummaryReportEmitsScheduleReport) {
+    auto ctx = make_ctx();
+    migris_schedule_t sched{};
+    migris_schedule_init(&sched);
+    ctx.schedule = &sched;
+    // Pre-load one activity directly; its request id is its TC[0..3].
+    const auto activity = build_tc({.source_id = 0x7U, .seq_count = 0x0042U});
+    ASSERT_EQ(migris_schedule_insert(&sched, 5000U, activity.data(), activity.size()),
+              MIGRIS_SCHEDULE_OK);
+
+    const std::array<std::uint8_t, 4U> id{activity[0], activity[1], activity[2], activity[3]};
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_SCHEDULING,
+                              .service_subtype = MIGRIS_PUS11_SUBTYPE_SUMMARY_REPORT_REQUEST,
+                              .source_id = 0xCAFEU},
+                             pus11_id_list_app({id}));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 1U);
+    EXPECT_EQ(key(tms[0]), pus11_report_key);
+    EXPECT_EQ(tms[0].secondary.destination_id, 0xCAFEU);
+    EXPECT_EQ(tms[0].primary.seq_count, 0U);
+    EXPECT_TRUE(tms[0].crc_ok);
 }
 
 }  // namespace

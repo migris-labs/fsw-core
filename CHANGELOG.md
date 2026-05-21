@@ -8,6 +8,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-10: on-board schedule + PUS-11 time-based scheduling.**
+  The framework's first scheduling primitive — time-tagged
+  telecommands that execute autonomously, with no continuous ground
+  link. A new freestanding C subtree `lib/schedule/` (with its own
+  C-friendly `.clang-tidy`) holds a bounded, static store of
+  activities — each an absolute CUC release time plus a telecommand
+  kept verbatim. **PUS-11** (`lib/pus/pus11.{h,c}`) is the
+  ground-facing face: a pragmatic core subset — enable [11,1] /
+  disable [11,2] the schedule, reset [11,3], insert [11,4], delete by
+  request identifier [11,5], and the summary report
+  [11,11] → [11,12]. A scheduled activity is identified by its 4-byte
+  **request identifier** — the first four bytes of its telecommand,
+  reusing the existing PUS-1 request-ID concept. Insert and delete are
+  **all-or-nothing**; the summary report is a query (an unscheduled
+  identifier is omitted, not an error). The `tc_uart` sample carries
+  the schedule and, each main-loop iteration, releases the one due
+  activity with the earliest release time — re-dispatching its stored
+  TC through the router exactly as if it had just arrived. PUS-11 is
+  wired into the router as the **fourth** routable service (accept
+  gate + the fsw-9 dispatch table; a `migris_pus11_ctx_t` and a
+  nullable `migris_schedule_t* schedule` in the router context,
+  NULL = no schedule = a routed PUS-11 TC fails its completion stage).
+  New host suites `tests/schedule_test.cpp` and `tests/pus11_test.cpp`;
+  `tests/tc_router_test.cpp` extended; `tests/renode/test_tc_uart_hk.py`
+  gains a scheduled-release closed-loop and a summary-report
+  round-trip. Wire format pinned in
+  [`docs/wire/pus-11.md`](docs/wire/pus-11.md). Scoped decisions:
+  - **Summary report, not detail.** The ECSS detail report
+    (11,9/11,10) echoes each activity's telecommand verbatim — an
+    unbounded packet. The summary report (11,11/11,12 — release time +
+    request identifier per activity) is bounded and fits the fixed
+    router buffer. The detail report is "large data" and pairs with
+    PUS-13 (the next slice); it, time-shift (11,7/8/15),
+    sub-schedules, groups, and filter-based selection are deferred.
+  - **The schedule starts disabled.** A freshly booted FSW does not
+    autonomously fire a stale schedule until ground sends [11,1] —
+    flight-safe by default.
+  - **RAM-only / volatile.** The schedule is empty after every reboot;
+    non-volatile persistence is deferred to the on-board storage slice
+    (PUS-15). *Trigger to revisit*: PUS-15.
+  - **A scheduled activity is re-dispatched, not specially executed.**
+    At release the stored TC goes through the normal
+    `migris_tc_router_dispatch` path — full accept-stage validation
+    and its own PUS-1 verification — so the release path needs no
+    separate execution engine, and a released TC that is itself
+    malformed is rejected exactly as a fresh one would be.
 - **Slice fsw-9: parameter datapool + PUS-20 on-board parameter
   management.** The framework's first on-board parameter store and the
   service that reports and sets it. A new freestanding C subtree
@@ -238,6 +284,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that special-cased "polled HK ⇒ bytes 28..31 are zero" must update.
 
 ### Changed
+- **`tc_uart` sample `TC_BUF_SIZE` raised 96 → 192** (fsw-10). The
+  largest baseline TC is now a PUS-11[4] insert carrying scheduled
+  telecommands. Sample only — no wire or library-API impact;
+  `MIGRIS_TC_ROUTER_MAX_TM` is unchanged (the PUS-11[12] summary
+  report's worst case fits the existing 128-byte buffer).
 - **`MIGRIS_TC_ROUTER_MAX_TM` raised 96 → 128** (fsw-9). The
   worst-case single-TC burst is now `PUS-1[1] (22) + PUS-20[2] (67,
   the maximum eight parameters) + PUS-1[7] (22) = 111`. This is a

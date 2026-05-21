@@ -3,11 +3,12 @@ sample:
   description: >-
     Zephyr application that listens on USART3 for a CCSDS Space
     Packet, runs it through the TC router (PUS-1 verification +
-    PUS-17 / PUS-3 / PUS-20 service routing), and writes the
-    resulting TM stream back on the same UART. Carries an on-board
-    parameter datapool whose PUS-3 housekeeping period is
-    live-tunable via PUS-20. Used by the Renode round-trip smoke
-    test in tests/renode/.
+    PUS-17 / PUS-3 / PUS-20 / PUS-11 service routing), and writes
+    the resulting TM stream back on the same UART. Carries an
+    on-board parameter datapool (PUS-3 housekeeping period
+    live-tunable via PUS-20) and an on-board schedule (PUS-11
+    time-tagged telecommands released autonomously). Used by the
+    Renode round-trip smoke test in tests/renode/.
 tests:
   sample.fsw-core.tc_uart:
     platform_allow: nucleo_h753zi

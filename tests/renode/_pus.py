@@ -164,6 +164,20 @@ DP_TYPE_WIDTH = {
 # (reserved range 0x0001..0x00FF).
 DP_PARAM_HK_PERIOD_SEC = 0x0001
 
+# PUS-11 on-board (time-based) scheduling (docs/wire/pus-11.md).
+PUS_SERVICE_SCHEDULING = 11
+PUS_11_SUBTYPE_ENABLE = 1  # TC, enable the schedule
+PUS_11_SUBTYPE_DISABLE = 2  # TC, disable the schedule
+PUS_11_SUBTYPE_RESET = 3  # TC, delete all activities
+PUS_11_SUBTYPE_INSERT = 4  # TC, insert activities
+PUS_11_SUBTYPE_DELETE = 5  # TC, delete by request id
+PUS_11_SUBTYPE_SUMMARY_REPORT_REQUEST = 11  # TC, summary-report by request id
+PUS_11_SUBTYPE_SUMMARY_REPORT = 12  # TM, the summary report
+
+# A scheduled activity's request identifier is the first 4 bytes of
+# its telecommand (the same identifier PUS-1 uses).
+SCHEDULE_REQUEST_ID_SIZE = 4
+
 
 @dataclass
 class PusTcSecondary:
@@ -373,6 +387,76 @@ def build_pus20_set_request_tc(
     )
 
 
+def build_pus11_enable_tc(
+    *,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-11[1] enable-schedule TC (no application
+    data)."""
+    return build_tc(
+        service_type=PUS_SERVICE_SCHEDULING,
+        service_subtype=PUS_11_SUBTYPE_ENABLE,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+    )
+
+
+def build_pus11_insert_tc(
+    *,
+    activities: list[tuple[int, bytes]],
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-11[4] insert TC. ``activities`` is a list
+    of (absolute release time, embedded telecommand bytes) pairs;
+    application data is a 1-byte count followed by each pair's 4-byte
+    big-endian release time and verbatim telecommand."""
+    app = struct.pack(">B", len(activities))
+    for release_time, tc in activities:
+        app += struct.pack(">I", release_time) + bytes(tc)
+    return build_tc(
+        service_type=PUS_SERVICE_SCHEDULING,
+        service_subtype=PUS_11_SUBTYPE_INSERT,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+        app_data=app,
+    )
+
+
+def build_pus11_report_tc(
+    *,
+    request_ids: list[bytes],
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-11[11] summary-report-request TC.
+    ``request_ids`` is a list of 4-byte request identifiers;
+    application data is a 1-byte count followed by them."""
+    app = struct.pack(">B", len(request_ids))
+    for rid in request_ids:
+        app += bytes(rid)
+    return build_tc(
+        service_type=PUS_SERVICE_SCHEDULING,
+        service_subtype=PUS_11_SUBTYPE_SUMMARY_REPORT_REQUEST,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+        app_data=app,
+    )
+
+
 def split_packets(stream: bytes) -> list[bytes]:
     """Walk a back-to-back TM byte stream into individual CCSDS Space
     Packets using each primary header's Packet Data Length. Trailing
@@ -466,4 +550,19 @@ def decode_pus20_report(tm: DecodedTm, type_map: dict[int, int]) -> dict[int, by
         width = DP_TYPE_WIDTH[type_map[pid]]
         out[pid] = data[pos : pos + width]
         pos += width
+    return out
+
+
+def decode_pus11_summary_report(tm: DecodedTm) -> list[tuple[int, bytes]]:
+    """Parse a PUS-11[12] schedule summary report's source data into a
+    list of (release time, 4-byte request identifier) tuples."""
+    data = tm.source_data
+    count = data[0]
+    out: list[tuple[int, bytes]] = []
+    pos = 1
+    for _ in range(count):
+        release_time = int.from_bytes(data[pos : pos + 4], "big")
+        request_id = data[pos + 4 : pos + 4 + SCHEDULE_REQUEST_ID_SIZE]
+        out.append((release_time, request_id))
+        pos += 4 + SCHEDULE_REQUEST_ID_SIZE
     return out

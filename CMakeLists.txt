@@ -68,11 +68,13 @@ target_sources(
           lib/pus/src/pus5.c
           lib/pus/src/pus17.c
           lib/pus/src/pus3.c
+          lib/pus/src/pus11.c
           lib/pus/src/pus20.c
           lib/pus/src/tc_router.c
           lib/fdir/src/event_fifo.c
           lib/fdir/src/fdir.c
-          lib/datapool/src/datapool.c)
+          lib/datapool/src/datapool.c
+          lib/schedule/src/schedule.c)
 
 target_include_directories(
   fsw-core
@@ -80,6 +82,7 @@ target_include_directories(
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/pus/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/fdir/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/datapool/include>
+         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/schedule/include>
          $<INSTALL_INTERFACE:include>)
 
 target_compile_features(fsw-core PUBLIC cxx_std_20 c_std_99)
@@ -146,6 +149,12 @@ install(
 
 install(
   DIRECTORY lib/datapool/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING
+  PATTERN "*.h")
+
+install(
+  DIRECTORY lib/schedule/include/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING
   PATTERN "*.h")

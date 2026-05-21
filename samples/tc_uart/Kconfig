@@ -64,3 +64,36 @@ config FSW_PUS20_MAX_PARAMS
 	  worst-case [20,2] packet. Capped at 8 here because the TC router
 	  output buffer (MIGRIS_TC_ROUTER_MAX_TM, a fixed 128) is sized for
 	  that worst case — a larger value needs that constant raised too.
+
+config FSW_SCHEDULE_CAPACITY
+	int "On-board schedule capacity (activities)"
+	default 16
+	range 1 256
+	help
+	  Number of time-tagged telecommands the on-board schedule can
+	  hold. Wired into the freestanding lib via the
+	  MIGRIS_SCHEDULE_CAPACITY compile definition so flight and host
+	  builds size the store identically.
+
+config FSW_SCHEDULE_TC_MAX
+	int "On-board schedule per-activity TC size (bytes)"
+	default 64
+	range 16 256
+	help
+	  Largest telecommand, in bytes, that one scheduled activity can
+	  hold. Wired into the freestanding lib via the
+	  MIGRIS_SCHEDULE_TC_MAX compile definition. 64 covers the
+	  PUS-17 / PUS-20-class leaf commands of the baseline; a PUS-11
+	  insert carrying a larger telecommand is rejected.
+
+config FSW_PUS11_MAX_PER_TC
+	int "PUS-11 maximum activities per TC"
+	default 8
+	range 1 8
+	help
+	  Upper bound on the activities one PUS-11 insert / delete / report
+	  TC may carry, and one [11,12] summary report may list. Wired into
+	  the freestanding lib via the MIGRIS_PUS11_MAX_PER_TC compile
+	  definition; it bounds the worst-case [11,12] packet. Capped at 8
+	  here because the TC router output buffer (MIGRIS_TC_ROUTER_MAX_TM,
+	  a fixed 128) is sized for that worst case.
