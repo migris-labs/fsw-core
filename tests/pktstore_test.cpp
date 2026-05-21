@@ -23,7 +23,8 @@ namespace {
 // A fake telemetry packet: `len` bytes all equal to `tag`, so a
 // retrieved packet is identifiable by its first byte.
 std::vector<std::uint8_t> fake_packet(std::uint8_t tag, std::size_t len) {
-    return std::vector<std::uint8_t>(len, tag);
+    std::vector<std::uint8_t> packet(len, tag);
+    return packet;
 }
 
 // Store a fake packet tagged `tag` at `storage_time`; return the
@@ -34,6 +35,20 @@ int put(migris_pktstore_t& store,
         std::size_t len = 8U) {
     const auto pkt = fake_packet(tag, len);
     return migris_pktstore_store(&store, pkt.data(), pkt.size(), storage_time);
+}
+
+// Drain an armed retrieval to completion, returning each delivered
+// packet's first byte (its identifying tag) in delivery order. A
+// gtest-free helper so the retrieval loop stays out of the test body's
+// clang-tidy cognitive-complexity budget.
+std::vector<std::uint8_t> drain_tags(migris_pktstore_t& store) {
+    std::array<std::uint8_t, MIGRIS_PKTSTORE_PACKET_MAX> out{};
+    std::size_t out_len = 0U;
+    std::vector<std::uint8_t> tags;
+    while (migris_pktstore_retrieve_next(&store, out.data(), out.size(), &out_len) == 1) {
+        tags.push_back(out[0]);
+    }
+    return tags;
 }
 
 TEST(PktStore, InitIsEmptyAndEnabled) {
@@ -155,22 +170,17 @@ TEST(PktStore, RetrieveNextReturnsZeroWhenNoRetrievalArmed) {
 TEST(PktStore, RetrieveDeliversTheTimeWindowInOrder) {
     migris_pktstore_t store{};
     migris_pktstore_init(&store);
-    ASSERT_EQ(put(store, 0x10U, 10U), 1);
-    ASSERT_EQ(put(store, 0x20U, 20U), 1);
-    ASSERT_EQ(put(store, 0x30U, 30U), 1);
-    ASSERT_EQ(put(store, 0x40U, 40U), 1);
+    put(store, 0x10U, 10U);
+    put(store, 0x20U, 20U);
+    put(store, 0x30U, 30U);
+    put(store, 0x40U, 40U);
+    ASSERT_EQ(migris_pktstore_count(&store), 4U);
 
     // Window [15, 35] selects the times-20 and times-30 packets.
     ASSERT_EQ(migris_pktstore_arm_retrieval(&store, 15U, 35U), MIGRIS_PKTSTORE_OK);
     EXPECT_EQ(migris_pktstore_retrieval_active(&store), 1);
 
-    std::array<std::uint8_t, MIGRIS_PKTSTORE_PACKET_MAX> out{};
-    std::size_t out_len = 0U;
-    std::vector<std::uint8_t> tags;
-    while (migris_pktstore_retrieve_next(&store, out.data(), out.size(), &out_len) == 1) {
-        tags.push_back(out[0]);
-    }
-    EXPECT_EQ(tags, (std::vector<std::uint8_t>{0x20U, 0x30U}));
+    EXPECT_EQ(drain_tags(store), (std::vector<std::uint8_t>{0x20U, 0x30U}));
     EXPECT_EQ(migris_pktstore_retrieval_active(&store), 0);  // exhausted → cleared
     // The retrieval is non-destructive — every packet is still stored.
     EXPECT_EQ(migris_pktstore_count(&store), 4U);
