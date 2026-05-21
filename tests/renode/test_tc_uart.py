@@ -31,17 +31,23 @@ import pytest
 from _pus import (
     ACK_ACCEPTANCE,
     ACK_COMPLETION,
+    DP_PARAM_HK_PERIOD_SEC,
+    DP_TYPE_U32,
     FC_CRC_FAILURE,
+    FC_EXEC_FAILURE,
     FSW_APID,
     PACKET_TYPE_TM,
     PUS_1_SUBTYPE_ACCEPTANCE_FAILURE,
     PUS_1_SUBTYPE_ACCEPTANCE_SUCCESS,
+    PUS_1_SUBTYPE_COMPLETION_FAILURE,
     PUS_1_SUBTYPE_COMPLETION_SUCCESS,
     PUS_5_SUBTYPE_INFO,
     PUS_5_SUBTYPE_LOW,
     PUS_17_SUBTYPE_ARE_YOU_ALIVE_TC,
     PUS_17_SUBTYPE_ARE_YOU_ALIVE_TM,
+    PUS_20_SUBTYPE_VALUE_REPORT,
     PUS_SERVICE_EVENT_REPORTING,
+    PUS_SERVICE_ONBOARD_PARAMETER,
     PUS_SERVICE_TEST,
     PUS_SERVICE_VERIFICATION,
     PUS_VERSION_C,
@@ -54,6 +60,8 @@ from _pus import (
     SEQ_FLAGS_UNSEGMENTED,
     DecodedTm,
     build_pus17_are_you_alive_tc,
+    build_pus20_report_request_tc,
+    decode_pus20_report,
     split_packets,
 )
 
@@ -339,3 +347,75 @@ def test_sequence_count_coherent_across_consecutive_tcs(tc_running) -> None:  # 
     assert [t.primary.seq_count for t in tms] == [1, 2, 3, 4, 5, 6], raw.hex()
     for t in tms:
         assert t.crc_ok, raw.hex()
+
+
+# Must match the CI ``zephyr-tc`` build override
+# (-DCONFIG_FSW_PUS3_HK_PERIOD_SEC): the tc ELF seeds the
+# housekeeping-period datapool parameter with it.
+TC_ELF_HK_PERIOD_SEC = 86400
+
+
+def test_pus20_report_request_round_trips_the_hk_period(tc_running) -> None:  # noqa: F811
+    """A PUS-20[1] report request for the housekeeping-period datapool
+    parameter (framework ID 0x0001) yields one well-formed PUS-20[2]
+    value report carrying the period the tc build seeded — the slice
+    fsw-9 demonstration of operator-visible on-board parameters."""
+    _, uart = tc_running
+
+    source_id = 0x0077
+    uart.send(
+        build_pus20_report_request_tc(
+            param_ids=[DP_PARAM_HK_PERIOD_SEC], source_id=source_id
+        )
+    )
+    # PUS-20[2] for one u32 parameter: primary 6 + TM sec 10 +
+    # source data (1 count + 2 ID + 4 value) + CRC 2 = 25 bytes.
+    boot, raw = _read_after_boot(uart, 25, timeout=30.0)
+    _assert_boot_event(boot)
+
+    pkts = split_packets(raw)
+    assert len(pkts) == 1, raw.hex()
+    tm = DecodedTm.decode(pkts[0])
+    assert tm.primary.type == PACKET_TYPE_TM
+    assert tm.primary.apid == FSW_APID
+    assert tm.primary.seq_count == 1  # boot event consumed count 0
+    assert tm.secondary.service_type == PUS_SERVICE_ONBOARD_PARAMETER
+    assert tm.secondary.service_subtype == PUS_20_SUBTYPE_VALUE_REPORT
+    assert tm.secondary.destination_id == source_id
+    assert tm.crc_ok
+
+    values = decode_pus20_report(tm, {DP_PARAM_HK_PERIOD_SEC: DP_TYPE_U32})
+    assert set(values) == {DP_PARAM_HK_PERIOD_SEC}, raw.hex()
+    period = int.from_bytes(values[DP_PARAM_HK_PERIOD_SEC], "big")
+    assert period == TC_ELF_HK_PERIOD_SEC
+
+
+def test_pus20_unknown_id_is_accepted_then_completion_fails(  # noqa: F811
+    tc_running,
+) -> None:
+    """A PUS-20[1] naming an undefined parameter ID passes acceptance,
+    then fails completion with EXEC_FAILURE — and emits no value
+    report (the all-or-nothing rule, docs/wire/pus-20.md)."""
+    _, uart = tc_running
+
+    uart.send(
+        build_pus20_report_request_tc(
+            param_ids=[0x0999],
+            ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+            source_id=0x0042,
+        )
+    )
+    total = PUS1_SUCCESS_TM_PACKET_SIZE + PUS1_FAILURE_TM_PACKET_SIZE
+    boot, raw = _read_after_boot(uart, total, timeout=30.0)
+    _assert_boot_event(boot)
+
+    pkts = split_packets(raw)
+    assert len(pkts) == 2, raw.hex()
+    accept, complete = (DecodedTm.decode(p) for p in pkts)
+
+    assert accept.secondary.service_type == PUS_SERVICE_VERIFICATION
+    assert accept.secondary.service_subtype == PUS_1_SUBTYPE_ACCEPTANCE_SUCCESS
+    assert complete.secondary.service_type == PUS_SERVICE_VERIFICATION
+    assert complete.secondary.service_subtype == PUS_1_SUBTYPE_COMPLETION_FAILURE
+    assert complete.failure_code == FC_EXEC_FAILURE
+    assert accept.crc_ok and complete.crc_ok

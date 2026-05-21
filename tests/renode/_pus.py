@@ -134,6 +134,36 @@ PUS3_HK_SOURCE_DATA_SIZE = 29  # SID(2) + 27-byte param block
 # primary 6 + TM sec 10 + source data 29 + CRC 2.
 PUS3_HK_TM_PACKET_SIZE = 47
 
+# PUS-20 on-board parameter management (docs/wire/pus-20.md).
+PUS_SERVICE_ONBOARD_PARAMETER = 20
+PUS_20_SUBTYPE_REPORT_REQUEST = 1  # TC, report parameter values
+PUS_20_SUBTYPE_VALUE_REPORT = 2  # TM, parameter value report
+PUS_20_SUBTYPE_SET_REQUEST = 3  # TC, set parameter values
+
+# Datapool scalar type codes and their on-wire widths. The type code
+# is carried only in the MIB, never in a PUS-20 packet — the wire is
+# not self-describing, so a decoder needs the id->type map.
+DP_TYPE_U8 = 0
+DP_TYPE_U16 = 1
+DP_TYPE_U32 = 2
+DP_TYPE_I8 = 3
+DP_TYPE_I16 = 4
+DP_TYPE_I32 = 5
+DP_TYPE_F32 = 6
+DP_TYPE_WIDTH = {
+    DP_TYPE_U8: 1,
+    DP_TYPE_U16: 2,
+    DP_TYPE_U32: 4,
+    DP_TYPE_I8: 1,
+    DP_TYPE_I16: 2,
+    DP_TYPE_I32: 4,
+    DP_TYPE_F32: 4,
+}
+
+# Framework datapool parameter IDs the tc_uart sample registers
+# (reserved range 0x0001..0x00FF).
+DP_PARAM_HK_PERIOD_SEC = 0x0001
+
 
 @dataclass
 class PusTcSecondary:
@@ -292,6 +322,57 @@ def build_pus17_are_you_alive_tc(
     )
 
 
+def build_pus20_report_request_tc(
+    *,
+    param_ids: list[int],
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-20[1] report-parameter-values TC.
+    Application data is a 1-byte count followed by the 2-byte
+    big-endian parameter IDs."""
+    app = struct.pack(">B", len(param_ids))
+    for pid in param_ids:
+        app += struct.pack(">H", pid)
+    return build_tc(
+        service_type=PUS_SERVICE_ONBOARD_PARAMETER,
+        service_subtype=PUS_20_SUBTYPE_REPORT_REQUEST,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+        app_data=app,
+    )
+
+
+def build_pus20_set_request_tc(
+    *,
+    params: list[tuple[int, bytes]],
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-20[3] set-parameter-values TC. ``params``
+    is a list of (parameter ID, encoded big-endian value bytes) pairs;
+    each value's width must match the parameter's registered type (the
+    PUS-20 wire is not self-describing)."""
+    app = struct.pack(">B", len(params))
+    for pid, value in params:
+        app += struct.pack(">H", pid) + value
+    return build_tc(
+        service_type=PUS_SERVICE_ONBOARD_PARAMETER,
+        service_subtype=PUS_20_SUBTYPE_SET_REQUEST,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+        app_data=app,
+    )
+
+
 def split_packets(stream: bytes) -> list[bytes]:
     """Walk a back-to-back TM byte stream into individual CCSDS Space
     Packets using each primary header's Packet Data Length. Trailing
@@ -367,3 +448,22 @@ class DecodedTm:
         """The PUS-3 Structure ID (first 2 source-data bytes,
         big-endian). Only meaningful for PUS-3[25] TM."""
         return int.from_bytes(self.source_data[:PUS3_SID_SIZE], "big")
+
+
+def decode_pus20_report(tm: DecodedTm, type_map: dict[int, int]) -> dict[int, bytes]:
+    """Split a PUS-20[2] parameter value report's source data into an
+    ``{parameter ID: raw value bytes}`` map. ``type_map`` gives each
+    parameter's datapool type code so the variable-width values can be
+    cut — the PUS-20 wire is not self-describing (docs/wire/pus-20.md).
+    The caller interprets the value bytes (e.g. big-endian int)."""
+    data = tm.source_data
+    count = data[0]
+    out: dict[int, bytes] = {}
+    pos = 1
+    for _ in range(count):
+        pid = int.from_bytes(data[pos : pos + 2], "big")
+        pos += 2
+        width = DP_TYPE_WIDTH[type_map[pid]]
+        out[pid] = data[pos : pos + width]
+        pos += width
+    return out

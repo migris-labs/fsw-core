@@ -19,6 +19,7 @@
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
 #include "migris/fsw/pus/pus17.h"
+#include "migris/fsw/pus/pus20.h"
 #include "migris/fsw/pus/pus3.h"
 #include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/pus_tc.h"
@@ -95,7 +96,8 @@ void migris_tc_accept(const uint8_t* tc,
         return;
     }
     if (sec.service_type != MIGRIS_PUS_SERVICE_TEST &&
-        sec.service_type != MIGRIS_PUS_SERVICE_HOUSEKEEPING) {
+        sec.service_type != MIGRIS_PUS_SERVICE_HOUSEKEEPING &&
+        sec.service_type != MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER) {
         out->fc = MIGRIS_PUS1_FC_UNKNOWN_SERVICE;
         return;
     }
@@ -170,12 +172,121 @@ static int router_pus3_oneshot(migris_tc_router_ctx_t* ctx,
     return 0;
 }
 
-/* Route an accepted TC to its service handler by service type.
- * migris_tc_accept already rejected every type other than PUS-17 and
- * PUS-3, so the default arm is unreachable — kept only to keep the
- * switch total (-Wswitch / clang-tidy). Returns the bytes written into
- * `out`; on a handler error, sets `*exec_fc` to the PUS-1
- * completion-failure cause and returns 0. */
+/* The routable services share one uniform handler signature so the
+ * router dispatches them through a table rather than a growing switch.
+ * A handler receives the accept result (parsed identity), the FSW
+ * clock, the raw TC (PUS-3 and PUS-20 read application data from it;
+ * PUS-17 ignores it) and the output slice; it returns the bytes
+ * written into `out`, or 0 with `*exec_fc` set to the PUS-1
+ * completion-failure cause on a handler error. `router_pus3_oneshot`
+ * above already conforms to this signature.
+ *
+ * The function-pointer table replaces the service-type switch as of
+ * slice fsw-9 — the "earned at a third independent service" point
+ * fsw-7 pinned, PUS-20 being that third routable service. */
+typedef int (*router_handler_fn)(migris_tc_router_ctx_t* ctx,
+                                 const migris_tc_accept_result_t* v,
+                                 uint32_t now_seconds,
+                                 const uint8_t* tc,
+                                 size_t tc_len,
+                                 uint8_t* out,
+                                 size_t out_cap,
+                                 migris_pus1_failure_code_t* exec_fc);
+
+/* PUS-17 handler — the are-you-alive connection test carries no
+ * application data, so `tc`/`tc_len` are unused here. */
+static int router_pus17(migris_tc_router_ctx_t* ctx,
+                        const migris_tc_accept_result_t* v,
+                        uint32_t now_seconds,
+                        const uint8_t* tc,
+                        size_t tc_len,
+                        uint8_t* out,
+                        size_t out_cap,
+                        migris_pus1_failure_code_t* exec_fc) {
+    (void)tc;
+    (void)tc_len;
+    const int rc = migris_pus17_execute(&ctx->pus17,
+                                        ctx->apid,
+                                        &ctx->tm_seq_count,
+                                        now_seconds,
+                                        v->service_subtype,
+                                        v->source_id,
+                                        out,
+                                        out_cap);
+    if (rc > 0) {
+        return rc;
+    }
+    if (rc == MIGRIS_PUS17_ERR_NOT_PUS17_TC) {
+        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
+    } else {
+        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+    }
+    return 0;
+}
+
+/* PUS-20 handler — on-board parameter management. Reads the TC
+ * application data (after the primary + TC secondary header, before
+ * the CRC); migris_tc_accept already guaranteed `tc_len` equals the
+ * declared total and is at least MIGRIS_TC_ROUTER_MIN_TC, so the
+ * subtraction below cannot underflow. A [20,3] set returns 0 (no TM,
+ * completion success); a [20,1] report returns the TM byte count. If
+ * no datapool is wired on this AP the TC fails its completion stage. */
+static int router_pus20(migris_tc_router_ctx_t* ctx,
+                        const migris_tc_accept_result_t* v,
+                        uint32_t now_seconds,
+                        const uint8_t* tc,
+                        size_t tc_len,
+                        uint8_t* out,
+                        size_t out_cap,
+                        migris_pus1_failure_code_t* exec_fc) {
+    if (ctx->datapool == NULL) {
+        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+        return 0;
+    }
+    const size_t app_off = MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE;
+    const size_t app_len = tc_len - app_off - 2U;
+    const int rc = migris_pus20_execute(&ctx->pus20,
+                                        ctx->datapool,
+                                        ctx->apid,
+                                        &ctx->tm_seq_count,
+                                        now_seconds,
+                                        v->service_subtype,
+                                        v->source_id,
+                                        &tc[app_off],
+                                        app_len,
+                                        out,
+                                        out_cap);
+    if (rc > 0) {
+        return rc;
+    }
+    if (rc == MIGRIS_PUS20_OK) {
+        return 0; /* [20,3] set succeeded — no TM, completion success */
+    }
+    if (rc == MIGRIS_PUS20_ERR_BAD_SUBTYPE) {
+        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
+    } else {
+        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+    }
+    return 0;
+}
+
+/* Service-type → handler dispatch table. migris_tc_accept rejects
+ * every service type absent from this table, so a routed (accepted)
+ * TC always matches an entry. */
+typedef struct {
+    uint8_t service_type;
+    router_handler_fn handler;
+} router_dispatch_entry_t;
+
+static const router_dispatch_entry_t router_dispatch_table[] = {
+    {MIGRIS_PUS_SERVICE_TEST, router_pus17},
+    {MIGRIS_PUS_SERVICE_HOUSEKEEPING, router_pus3_oneshot},
+    {MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER, router_pus20},
+};
+
+/* Route an accepted TC to its service handler. Returns the bytes
+ * written into `out`; on a handler error, sets `*exec_fc` to the
+ * PUS-1 completion-failure cause and returns 0. */
 static int router_route(migris_tc_router_ctx_t* ctx,
                         const migris_tc_accept_result_t* v,
                         uint32_t now_seconds,
@@ -184,32 +295,17 @@ static int router_route(migris_tc_router_ctx_t* ctx,
                         uint8_t* out,
                         size_t out_cap,
                         migris_pus1_failure_code_t* exec_fc) {
-    switch (v->service_type) {
-    case MIGRIS_PUS_SERVICE_TEST: {
-        const int rc = migris_pus17_execute(&ctx->pus17,
-                                            ctx->apid,
-                                            &ctx->tm_seq_count,
-                                            now_seconds,
-                                            v->service_subtype,
-                                            v->source_id,
-                                            out,
-                                            out_cap);
-        if (rc > 0) {
-            return rc;
+    const size_t entries = sizeof router_dispatch_table / sizeof router_dispatch_table[0];
+    for (size_t i = 0U; i < entries; ++i) {
+        if (router_dispatch_table[i].service_type == v->service_type) {
+            return router_dispatch_table[i].handler(
+                ctx, v, now_seconds, tc, tc_len, out, out_cap, exec_fc);
         }
-        if (rc == MIGRIS_PUS17_ERR_NOT_PUS17_TC) {
-            *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
-        } else {
-            *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
-        }
-        return 0;
     }
-    case MIGRIS_PUS_SERVICE_HOUSEKEEPING:
-        return router_pus3_oneshot(ctx, v, now_seconds, tc, tc_len, out, out_cap, exec_fc);
-    default:
-        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
-        return 0;
-    }
+    /* Unreachable: migris_tc_accept rejects any non-table service
+     * type. Kept so the function is total. */
+    *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+    return 0;
 }
 
 /* Report a TC that failed acceptance as a spontaneous FDIR anomaly,

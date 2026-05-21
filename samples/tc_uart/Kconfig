@@ -12,11 +12,15 @@ config FSW_PUS3_HK_PERIOD_SEC
 	default 5
 	range 1 86400
 	help
-	  Interval between spontaneous PUS-3[25] housekeeping parameter
-	  reports emitted by the main loop. The cadence is a coarse
-	  main-loop elapsed-time check against the FSW clock
-	  (k_uptime_get()/1000), not a kernel timer. The default (5 s) is
-	  operationally sane. The Renode closed-loop suite builds two
+	  Initial value of datapool parameter 0x0001 — the interval between
+	  spontaneous PUS-3[25] housekeeping parameter reports emitted by
+	  the main loop. The cadence is a coarse main-loop elapsed-time
+	  check against the FSW clock (k_uptime_get()/1000), not a kernel
+	  timer. As of slice fsw-9 the period is a live-tunable datapool
+	  parameter: a PUS-20[3] set retunes the cadence with no rebuild,
+	  and a value of 0 disables periodic housekeeping. This symbol only
+	  seeds the initial value. The default (5 s) is operationally sane.
+	  The Renode closed-loop suite builds two
 	  artefacts from this one sample: the verification-stream ELF pins
 	  this to 86400 (effectively "never within a test" — Renode
 	  fast-forwards idle virtual time, so a fixed short period would
@@ -37,3 +41,26 @@ config FSW_FDIR_EVENT_FIFO_CAPACITY
 	  burst of rejected TCs plus RX-overflow events between main-loop
 	  drains; raise it only if a producer can outpace one drain per
 	  loop iteration.
+
+config FSW_DATAPOOL_CAPACITY
+	int "Parameter datapool capacity (parameters)"
+	default 8
+	range 1 256
+	help
+	  Number of parameters the on-board datapool can hold. Wired into
+	  the freestanding lib via the MIGRIS_DATAPOOL_CAPACITY compile
+	  definition so flight and host builds size the store identically.
+	  This sample registers a single parameter (the housekeeping
+	  period); the default (8) leaves room for a mission to add more.
+
+config FSW_PUS20_MAX_PARAMS
+	int "PUS-20 maximum parameters per TC"
+	default 8
+	range 1 8
+	help
+	  Upper bound on the parameters one PUS-20 TC may address and one
+	  [20,2] report may carry. Wired into the freestanding lib via the
+	  MIGRIS_PUS20_MAX_PARAMS_PER_TC compile definition; it bounds the
+	  worst-case [20,2] packet. Capped at 8 here because the TC router
+	  output buffer (MIGRIS_TC_ROUTER_MAX_TM, a fixed 128) is sized for
+	  that worst case — a larger value needs that constant raised too.

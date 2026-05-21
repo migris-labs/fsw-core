@@ -8,6 +8,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-9: parameter datapool + PUS-20 on-board parameter
+  management.** The framework's first on-board parameter store and the
+  service that reports and sets it. A new freestanding C subtree
+  `lib/datapool/` (with its own C-friendly `.clang-tidy`) carries a
+  typed, fixed-capacity parameter store and the framework's first
+  tagged-union **variant type** `migris_dp_value_t` — the unsigned and
+  signed 8/16/32-bit integers and 32-bit IEEE-754 float — plus a
+  big-endian value codec. **PUS-20** (`lib/pus/pus20.{h,c}`) is the
+  ground-facing face: the complete three-message standard service —
+  TC[20,1] report parameter values, TM[20,2] parameter value report,
+  TC[20,3] set parameter values. A [20,3] set is **all-or-nothing**:
+  every (ID, value) pair is decoded and validated (defined,
+  read-write, value bytes present) before any datapool write, so a
+  failure leaves the pool untouched and the router maps it to a
+  PUS-1[8] completion failure. PUS-20 is wired into the TC router as
+  the third routable service — added to the accept gate, with a
+  `migris_pus20_ctx_t` and a nullable `migris_datapool_t* datapool` in
+  the router context (held by pointer like `sink`; NULL — the
+  zero-init default — means no datapool, so a routed PUS-20 TC fails
+  its completion stage and prior callers are unaffected). The
+  `tc_uart` sample instantiates a datapool holding the PUS-3
+  housekeeping period as a read-write parameter (framework ID
+  `0x0001`, seeded from Kconfig) and reads it live every main-loop
+  iteration — so a PUS-20[3] set reconfigures the housekeeping cadence
+  with no rebuild, and a period of 0 disables it. New host suites
+  `tests/datapool_test.cpp` and `tests/pus20_test.cpp`;
+  `tests/tc_router_test.cpp` extended (the PUS-20 dispatch, the
+  null-datapool and unknown-ID completion failures, the worst-case
+  burst proving the buffer bump); `tests/renode/test_tc_uart.py` gains
+  the report round-trip and the unknown-ID failure, and
+  `test_tc_uart_hk.py` the live cadence retune. Wire format pinned in
+  [`docs/wire/pus-20.md`](docs/wire/pus-20.md). Scoped decisions:
+  - **Dispatch table, earned now.** PUS-20 is the third routable
+    inbound service (after PUS-17 and PUS-3), so the trigger fsw-7
+    pinned — "a function-pointer dispatch table is the next
+    abstraction, earned at a third independent service" — fires: the
+    router's service-type `switch` becomes a `{service_type →
+    handler}` table of uniform-signature handlers. The FDIR anomaly
+    registry's own `switch` is a *different* dispatch and stays a
+    switch — its trigger (a third anomaly) has not fired.
+  - **RAM-only / volatile.** Parameters reset to their initial values
+    on every reboot; non-volatile persistence across reset is
+    **deferred** to the on-board storage slice (PUS-15). *Trigger to
+    revisit*: the first slice needing a parameter to survive a reset.
+  - **Numbered parameters only.** A 2-byte ID is the addressable unit;
+    human-readable names live in the ground MIB, never on-board. The
+    ID range `0x0001`–`0x00FF` is reserved for fsw-core framework
+    parameters, `0x0100`+ for mission FSW (`cry4-fsw`) — mirroring the
+    PUS-3 SID and PUS-5 event-ID block splits. fsw-core hard-codes no
+    parameters; the application supplies the set at init.
+  - **Standard scalar type set.** Unsigned and signed 8/16/32-bit
+    integers and `f32`; no arrays, strings, 64-bit or double-precision
+    types. The `migris_dp_type_t` enum is **append-only** — a new type
+    takes the next free code and never renumbers an existing one — so
+    widening the set later is a non-breaking wire change.
+  - **Out of scope:** full PUS-3 ↔ datapool integration (housekeeping
+    structures selecting datapool parameter lists — the
+    structure-management subtypes PUS-3 deferred in fsw-7); PUS-20
+    parameter-definition reporting and vendor-extension subtypes;
+    non-volatile persistence.
 - **Slice fsw-8: FDIR primitives + router-side anomaly reporting +
   the bounded event FIFO.** The framework's first fault-detection and
   -reporting layer. A new freestanding C bounded **event FIFO**
@@ -178,6 +238,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that special-cased "polled HK ⇒ bytes 28..31 are zero" must update.
 
 ### Changed
+- **`MIGRIS_TC_ROUTER_MAX_TM` raised 96 → 128** (fsw-9). The
+  worst-case single-TC burst is now `PUS-1[1] (22) + PUS-20[2] (67,
+  the maximum eight parameters) + PUS-1[7] (22) = 111`. This is a
+  C-API / caller-buffer-size change only — **the bytes on the wire are
+  unchanged**. The `tc_uart` sample picks it up automatically
+  (`out[MIGRIS_TC_ROUTER_MAX_TM]`).
+- **`tc_uart` sample buffers grew for PUS-20** (fsw-9). `TC_BUF_SIZE`
+  64 → 96 (the largest baseline TC is now a PUS-20[3] set of eight
+  parameters, 62 bytes) and `CONFIG_MAIN_STACK_SIZE` 1024 → 2048 (the
+  datapool `main()`-local plus the PUS-20 dispatch call chain). Sample
+  only — no wire or library-API impact.
 - **`test_tc_uart.py` corrupted-TC expectation updated (fsw-8).** A
   rejected TC now additionally yields a trailing PUS-5[2]
   `TC_REJECTED` anomaly (and the no-ack case yields one with no
