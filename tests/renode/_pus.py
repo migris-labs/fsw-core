@@ -123,7 +123,6 @@ PUS5_EVT_TC_REJECTED = 0x0002  # aux: fc, service_type, service_subtype (3 bytes
 PUS5_EVT_RX_OVERFLOW = 0x0003  # aux: bytes-dropped delta (u32, big-endian)
 PUS5_EVT_MODE_CHANGED = 0x0004  # aux: previous mode id, new mode id (2 bytes, u8 each)
 PUS5_EVT_FDIR_RECOVERY = 0x0005  # aux: anomaly, safe mode id, occurrence count u16 BE (4 bytes)
-PUS5_EVT_FLASH_SELFTEST = 0x0006  # aux: status byte (0 = OK, non-zero = fail code)
 
 # PUS-3 housekeeping & diagnostic data reporting (docs/wire/pus-3.md).
 PUS_SERVICE_HOUSEKEEPING = 3

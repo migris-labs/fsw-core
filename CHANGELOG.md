@@ -8,6 +8,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-16: non-volatile (flash-backed) parameter storage.**
+  Operator-tuned parameters now survive a reboot — the framework's
+  first persistence capability, the most-deferred dependency in the
+  codebase (`lib/datapool/`, `lib/schedule/`, `lib/pktstore/`,
+  `lib/fdir/` and `lib/hkstore/` all carried explicit "until a
+  non-volatile-storage subsystem exists" comments). A new freestanding
+  C subtree `lib/nvstore/` (with its own C-friendly `.clang-tidy`)
+  carries the on-flash image format: two sectors of the board's
+  `storage_partition` are used as an **A/B ping-pong** pair, each
+  holding one image (magic + `format_version` + monotonic `seq` +
+  payload-length header, then a sequence of `{type, len, bytes}`
+  records, then a CRC-16-CCITT-FALSE over header+payload, padded to
+  the backend's write-block alignment). `save` erases the older sector
+  and writes the new image with `seq + 1`; `load` validates both
+  sectors and picks the valid copy with the higher `seq`. A power loss
+  mid-`save` leaves the previous copy intact in the other sector — the
+  standard power-safe NVM pattern, and it falls out of the
+  `nucleo_h753zi` storage partition's 2-sector geometry for free. The
+  flash I/O lives behind a seam (`migris_nv_backend_t`, modelled on the
+  fsw-8 event-sink seam) — the Zephyr sample supplies a concrete
+  backend over `flash_area_*` in `samples/tc_uart/src/nv_flash_backend.c`,
+  and the host unit tests supply a RAM-backed backend, so the image
+  format, A/B logic, CRC and `format_version` rejection are fully
+  host-tested. `lib/datapool/` gains pure `migris_datapool_serialize`
+  /`_deserialize` (reusing the existing big-endian value codec —
+  `migris_dp_value_encode`/`_decode`) and a `generation` counter
+  bumped on every successful `migris_datapool_set`; the `tc_uart`
+  sample restores the datapool from the persisted image at boot and
+  auto-saves whenever the generation advances (one coalesced flash
+  write per batch of sets). The Renode closed-loop in
+  `tests/renode/test_tc_uart_hk.py` is the proof: tune a parameter via
+  PUS-20[3] → `machine Reset` the emulated MCU → PUS-20[1] reports the
+  tuned value, not the Kconfig default. **No new PUS service, no wire
+  change** — persistence rides on the existing PUS-20 set/report. The
+  on-flash image format is pinned in [`docs/nv-image-format.md`](docs/nv-image-format.md).
+  Scoped decisions:
+  - **NVS rejected; raw `flash_area_*` used.** Zephyr's NVS subsystem
+    encodes a sector size as `uint16_t`, which overflows the STM32H7's
+    128 KB sector (Zephyr issues #36590 / #93295). The raw flash-map
+    API handles 128 KB sectors natively and gives us the explicit
+    control the A/B image format needs. *Trigger to revisit*: NVS
+    fixes the `uint16_t` overflow upstream AND a mission's
+    write-amplification budget requires per-record wear-levelling.
+  - **A/B redundancy at sector granularity, not record granularity.**
+    The whole image is rewritten on every save — flash thrash, in
+    principle. In practice operator parameter sets are operationally
+    infrequent (an operator tunes a parameter occasionally; STM32H7
+    flash endurance is ~10k cycles), so a once-per-set 128 KB erase
+    over the spacecraft's lifetime stays well inside the budget. A
+    log-structured / journalled layout earns its complexity only when
+    the write rate makes A/B unviable.
+  - **Auto-save on a successful PUS-20[3] set, not an explicit commit
+    command.** A separate "save to NVM" wire surface would have to
+    live in a vendor PUS service, which the pinned platform rule
+    places downstream (`cry4-fsw`), not in `fsw-core`. Auto-save needs
+    no new wire surface, the trigger (PUS-20[3]) is already a
+    deliberate operator action, and the closed-loop test stays clean
+    (set → reset → report). *Trigger to revisit*: a mission needs
+    decoupled RAM-copy / NVM-copy semantics — that adds the vendor
+    service downstream rather than re-shaping fsw-core.
+  - **One consumer (datapool) in this slice; schedule / hkstore /
+    mode persistence deferred to small follow-on slices.** The
+    `lib/nvstore/` infrastructure is the hard part; once it exists,
+    each additional consumer is a `serialize` / `deserialize` pair +
+    a new record type. Matching the fsw-4 = PUS infra + one service
+    rhythm gets a working, reviewable increment landed before the
+    less-load-bearing consumers pile on. *Trigger to revisit*: an
+    operational gap (the schedule re-loads from scratch on every
+    reboot is a meaningfully worse experience than the parameters
+    re-loading — fsw-17 candidate).
+  - **`pktstore` (mass memory) and `fdir` counters/latch deferred.**
+    The packet store's access pattern (every TM is captured) and its
+    typical content (re-derivable from the live stream) are different
+    enough from a config store that bundling them is wrong. The FDIR
+    confirmation latch surviving a reboot is also subtly wrong —
+    arguably the reboot IS part of recovery, and a latched-across-
+    reboot fault risks safing the spacecraft forever. Both warrant
+    their own slice with explicit semantics.
+  - **`format_version` rejection, unknown-record skip.** An on-flash
+    image with a version we do not understand is rejected (load
+    returns `NO_VALID_IMAGE` and the datapool falls back to defaults);
+    an unknown *record type* inside a recognised image is silently
+    ignored. So a layout-breaking change is fail-safe, while adding a
+    new record type later is non-breaking — old firmware ignores it,
+    new firmware emits both.
 - **Slice fsw-15: PUS-3 housekeeping structure management.** Ground can
   now define its own housekeeping structures, not just poll the one
   hard-coded framework structure fsw-7 shipped. A *dynamic* structure

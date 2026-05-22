@@ -219,16 +219,3 @@ config FSW_FDIR_TC_REJECTED_THRESHOLD
 	  transient rejection must never safe the spacecraft — this is the
 	  debounce count.
 
-config FSW_NV_FLASH_SELFTEST
-	bool "Run a flash self-test at boot (slice fsw-16)"
-	default n
-	help
-	  When set, the sample exercises the on-chip flash at boot — erase
-	  the first sector of the storage partition, write a known pattern,
-	  read it back and compare — and emits a PUS-5[1] FLASH_SELFTEST
-	  event whose 1-byte auxiliary data is the status (0 = OK, non-zero
-	  = a fail code; see lib/pus/pus5.h). The slice-fsw-16 way to retire
-	  the "does Renode's STM32H7 flash driver work" risk before the
-	  non-volatile parameter store is built on top of it. Kept gated so
-	  the verification-stream build (test_tc_uart.py) is unaffected; the
-	  Renode housekeeping build turns it on.

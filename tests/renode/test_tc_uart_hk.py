@@ -60,7 +60,6 @@ from _pus import (
     PUS3_HK_SOURCE_DATA_SIZE,
     PUS3_SID_FRAMEWORK_DIAG,
     PUS5_EVT_FDIR_RECOVERY,
-    PUS5_EVT_FLASH_SELFTEST,
     PUS5_EVT_MODE_CHANGED,
     PUS15_STORE_REPORT_SOURCE_SIZE,
     SEQ_FLAGS_UNSEGMENTED,
@@ -785,32 +784,93 @@ def test_dynamic_housekeeping_structure_lifecycle(tc_hk_running) -> None:  # noq
     assert completion.failure_code is None  # completion success
 
 
-# --- slice fsw-16 step 1: Renode flash de-risk -------------------------
+# --- slice fsw-16: non-volatile parameter persistence ------------------
 
 
-def test_flash_selftest_succeeds(tc_hk_running) -> None:  # noqa: F811
-    """The slice fsw-16 step-1 de-risk: with CONFIG_FSW_NV_FLASH_SELFTEST
-    set, the FSW at boot erases the first sector of the storage
-    partition, writes a 32-byte pattern, reads it back, and emits a
-    PUS-5[1] FLASH_SELFTEST event whose 1-byte aux is the status. A
-    status of 0 proves Renode's STM32H7 flash controller + Zephyr's
-    flash_stm32h7x.c driver work end-to-end on the emulated board —
-    the prerequisite the non-volatile parameter store builds on."""
-    _, uart = tc_hk_running
+def test_datapool_value_survives_a_warm_reset(tc_hk_running) -> None:  # noqa: F811
+    """The slice fsw-16 headline: a parameter tuned via PUS-20[3]
+    auto-saves to flash, the emulated MCU warm-resets, and on the
+    next boot the persisted value is reported instead of the Kconfig
+    default. End-to-end proof that on-board state survives a reboot
+    through the lib/nvstore/ A/B-redundant flash image."""
+    mon, uart = tc_hk_running
 
-    def find_selftest(tms: list[DecodedTm]):
+    # 1. Tune the HK period to a sentinel value distinct from the
+    #    Kconfig default (2) and from every other test's value.
+    sentinel = 1234
+    set_tc = build_pus20_set_request_tc(
+        params=[(DP_PARAM_HK_PERIOD_SEC, struct.pack(">I", sentinel))],
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0F00,
+        seq_count=0x10,
+    )
+    uart.send(set_tc)
+    _, set_completion = _collect(
+        uart, lambda ts: _completion_success(ts, set_tc[:4]), timeout=30.0
+    )
+    assert set_completion.failure_code is None
+
+    # 2. The save tick runs at the top of every main-loop iteration —
+    #    so by the time a *subsequent* TC's completion lands, the FSW
+    #    has done at least one more iteration and the save has fired.
+    #    The cheapest such TC is a PUS-17 ping with acceptance ack.
+    ping_tc = build_pus17_are_you_alive_tc(
+        ack_flags=ACK_ACCEPTANCE,
+        source_id=0x0F01,
+        seq_count=0x11,
+    )
+    uart.send(ping_tc)
+    _collect(
+        uart,
+        lambda ts: next(
+            (t for t in ts if t.secondary.service_type == PUS_SERVICE_TEST), None
+        ),
+        timeout=30.0,
+    )
+
+    # 3. Warm-reset the emulated MCU. Renode's `machine Reset` resets
+    #    the CPU and peripherals but DOES NOT touch the flash banks —
+    #    the storage_partition keeps the A/B image across the reset.
+    mon.cmd("machine Reset")
+
+    # 4. Ask the FSW to report the HK-period parameter on the
+    #    post-reset boot. Used a different source_id so the report is
+    #    uniquely identifiable in the cumulative UART buffer.
+    report_tc = build_pus20_report_request_tc(
+        param_ids=[DP_PARAM_HK_PERIOD_SEC],
+        ack_flags=ACK_ACCEPTANCE,
+        source_id=0x0F02,
+        seq_count=0x12,
+    )
+    uart.send(report_tc)
+
+    def find_post_reset_report(tms: list[DecodedTm]):
+        # Two boot events in the cumulative stream means we have seen
+        # a reset cycle; the report from our source_id is the
+        # post-reset response we care about.
+        boot_count = sum(
+            1
+            for t in tms
+            if t.secondary.service_type == PUS_SERVICE_EVENT_REPORTING
+            and t.event_id == PUS5_EVT_FSW_BOOT
+        )
+        if boot_count < 2:
+            return None
         return next(
             (
                 t
                 for t in tms
-                if t.secondary.service_type == PUS_SERVICE_EVENT_REPORTING
-                and t.event_id == PUS5_EVT_FLASH_SELFTEST
+                if t.secondary.service_type == PUS_SERVICE_ONBOARD_PARAMETER
+                and t.secondary.service_subtype == PUS_20_SUBTYPE_VALUE_REPORT
+                and t.secondary.destination_id == 0x0F02
             ),
             None,
         )
 
-    _, ev = _collect(uart, find_selftest, timeout=60.0)
-    assert ev.secondary.service_subtype == PUS_5_SUBTYPE_INFO
-    assert ev.secondary.destination_id == 0  # spontaneous, no triggering TC
-    assert ev.event_aux == bytes([0])  # status = OK (0); non-zero = a fail code
-    assert ev.crc_ok
+    _, report = _collect(uart, find_post_reset_report, timeout=60.0)
+    values = decode_pus20_report(report, {DP_PARAM_HK_PERIOD_SEC: DP_TYPE_U32})
+    # The reported value is the sentinel set BEFORE the reset, NOT the
+    # Kconfig default (2) — the persisted image was loaded and the
+    # datapool's parameter was restored.
+    assert int.from_bytes(values[DP_PARAM_HK_PERIOD_SEC], "big") == sentinel
+    assert report.crc_ok

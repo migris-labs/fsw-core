@@ -109,14 +109,6 @@ extern "C" {
  *  confirmation edge, before the MODE_CHANGED the recovery raises. */
 #define MIGRIS_PUS5_EVT_FDIR_RECOVERY 0x0005U
 
-/** On-board flash self-test result (slice fsw-16). Severity info [1].
- *  Auxiliary data is 1 byte — the status: ``0`` = OK, non-zero = a
- *  fail code (1 open, 2 erase, 3 write, 4 read, 5 mismatch). Emitted
- *  at boot when the sample's ``CONFIG_FSW_NV_FLASH_SELFTEST`` is set,
- *  to prove the on-chip flash driver works end-to-end on Renode before
- *  the non-volatile parameter store is built on top of it. */
-#define MIGRIS_PUS5_EVT_FLASH_SELFTEST 0x0006U
-
 /** Event severity. The wire subtype is ``severity + 1`` (INFO→[1],
  *  LOW→[2], MEDIUM→[3], HIGH→[4]); the enum value is also the index
  *  into the per-severity message-counter array in

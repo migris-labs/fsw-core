@@ -180,7 +180,7 @@ jobs:
             path: samples/tc_uart
             build_dir: zephyr-tc-hk
             artefact: fsw-core-tc-hk-nucleo_h753zi
-            cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=2 -DCONFIG_FSW_LARGEDATA_DEMO=y -DCONFIG_FSW_MODE_DEMO=y -DCONFIG_FSW_FDIR_RECOVERY_DEMO=y -DCONFIG_FSW_NV_FLASH_SELFTEST=y"
+            cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=2 -DCONFIG_FSW_LARGEDATA_DEMO=y -DCONFIG_FSW_MODE_DEMO=y -DCONFIG_FSW_FDIR_RECOVERY_DEMO=y"
     env:
       ZEPHYR_SDK_VERSION: "0.16.8"
     steps:
