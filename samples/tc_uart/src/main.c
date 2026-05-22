@@ -87,6 +87,16 @@
  * packet store like any other emitted telemetry. Wire format is
  * pinned in docs/wire/pus-13.md.
  *
+ * Slice fsw-14 completes the FDIR story with isolation and recovery.
+ * When CONFIG_FSW_FDIR_RECOVERY_DEMO is set, FDIR counts rejected
+ * telecommands; once they cross a confirmation threshold it declares
+ * the fault confirmed, emits a high-severity PUS-5 FDIR_RECOVERY
+ * event, and autonomously commands the mode manager to SAFE — a
+ * genuine closed loop a ground test drives by sending malformed TCs.
+ * Recovery is gated on the same build as the mode demo and is off in
+ * the verification-stream build. Wire format is pinned in
+ * docs/wire/pus-5.md.
+ *
  * Single producer (the RX IRQ) and single consumer (main thread)
  * make ring_buf safe without explicit locking. We send TM with
  * blocking ``uart_poll_out`` — this slice has no concurrent TX
@@ -355,6 +365,23 @@ int main(void) {
     };
     (void)migris_mode_init(
         &mode_mgr, mode_defs, sizeof(mode_defs) / sizeof(mode_defs[0]), FSW_MODE_BOOT, &fdir_sink);
+#endif
+
+#ifdef CONFIG_FSW_FDIR_RECOVERY_DEMO
+    /* Slice fsw-14: arm FDIR isolation/recovery. After
+     * CONFIG_FSW_FDIR_TC_REJECTED_THRESHOLD rejected telecommands FDIR
+     * confirms the fault, emits a high-severity PUS-5 FDIR_RECOVERY
+     * event, and autonomously commands the mode manager to SAFE. The
+     * MODE_CHANGED that the transition raises drains through the same
+     * FDIR FIFO, so the main loop needs no new tick. */
+    const migris_fdir_confirm_def_t fdir_confirms[] = {
+        {MIGRIS_FDIR_ANOM_TC_REJECTED, CONFIG_FSW_FDIR_TC_REJECTED_THRESHOLD},
+    };
+    (void)migris_fdir_arm_recovery(&fdir,
+                                   &mode_mgr,
+                                   FSW_MODE_SAFE,
+                                   fdir_confirms,
+                                   sizeof(fdir_confirms) / sizeof(fdir_confirms[0]));
 #endif
 
     uint8_t tc[TC_BUF_SIZE];

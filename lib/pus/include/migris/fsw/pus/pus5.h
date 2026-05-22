@@ -102,6 +102,13 @@ extern "C" {
  *  the mode manager (lib/mode/) on a successful transition. */
 #define MIGRIS_PUS5_EVT_MODE_CHANGED 0x0004U
 
+/** FDIR confirmed a fault and commanded an autonomous recovery.
+ *  Severity high [4]. Auxiliary data is 4 bytes — the anomaly type,
+ *  the safe-mode ID commanded, then the occurrence count at
+ *  confirmation (big-endian u16). Emitted by lib/fdir/ on the
+ *  confirmation edge, before the MODE_CHANGED the recovery raises. */
+#define MIGRIS_PUS5_EVT_FDIR_RECOVERY 0x0005U
+
 /** Event severity. The wire subtype is ``severity + 1`` (INFO→[1],
  *  LOW→[2], MEDIUM→[3], HIGH→[4]); the enum value is also the index
  *  into the per-severity message-counter array in

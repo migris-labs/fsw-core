@@ -7,22 +7,26 @@
  * event report on the downlink, decoupled from its detector by the
  * bounded event FIFO.
  *
- * Scope this slice is **detection + event reporting only**. An anomaly
- * registry maps a typed anomaly to a (PUS-5 severity, event-definition
- * ID) pair; producers either use that typed API (the main-loop UART
+ * Detection and event reporting (slice fsw-8): an anomaly registry
+ * maps a typed anomaly to a (PUS-5 severity, event-definition ID)
+ * pair; producers either use that typed API (the main-loop UART
  * RX-overflow detector) or report an already-classified event through
  * the generic event sink (the TC router, which must not depend on
  * FDIR — see migris/fsw/event_sink.h). Both paths enqueue into the
  * same FIFO; the buffer owner drains it, one PUS-5 report per record.
  *
- * Isolation and Recovery — occurrence counters with thresholds,
- * debounce / confirmation, recovery actions, mode transitions, FDIR
- * enable/disable (PUS-5 control subtypes 5/6), persistence across
- * reset — are deliberately **deferred**. They presuppose a mode
- * manager and a recoverable-subsystem consumer, neither of which
- * exists yet; building them now would be an abstraction with no
- * caller. Trigger to revisit: the first slice that introduces a mode
- * manager or a subsystem with a defined recovery action.
+ * Isolation and recovery (slice fsw-14): each anomaly accumulates a
+ * saturating occurrence count; when it crosses an application-supplied
+ * threshold the fault is *confirmed* — a single transient never
+ * recovers (debounce) — and FDIR autonomously commands a transition to
+ * a safe mode through the mode manager (lib/mode/) and emits a
+ * high-severity FDIR_RECOVERY event. Recovery is armed by
+ * ``migris_fdir_arm_recovery`` and can be suppressed with
+ * ``migris_fdir_set_enabled`` (for commissioning, where a confirmed
+ * fault must not safe the vehicle). Persistence of the occurrence
+ * counters and the confirmation latch across reset stays deferred —
+ * they are RAM-only, like every other framework store, until a
+ * non-volatile-storage subsystem exists.
  *
  * The severity / event-ID mapping in the registry (fdir.c) is the
  * single source of truth for how an anomaly classifies on the wire;
@@ -36,6 +40,7 @@
 
 #include "migris/fsw/event_sink.h"
 #include "migris/fsw/fdir/event_fifo.h"
+#include "migris/fsw/mode/mode.h"
 #include "migris/fsw/pus/pus5.h"
 
 #include <stddef.h>
@@ -61,17 +66,75 @@ typedef enum {
     MIGRIS_FDIR_ANOM_RX_OVERFLOW = 1
 } migris_fdir_anomaly_t;
 
+/** Number of distinct anomaly types — the size of the per-anomaly
+ *  occurrence / threshold / confirmation arrays. Kept in lockstep with
+ *  ``migris_fdir_anomaly_t``: adding an anomaly bumps the enum, this
+ *  count, and the registry ``switch`` in fdir.c together. */
+#define MIGRIS_FDIR_ANOMALY_COUNT 2U
+
+/** Per-anomaly confirmation policy, supplied by the application to
+ *  ``migris_fdir_arm_recovery``. ``threshold`` is the occurrence count
+ *  at which the anomaly is *confirmed* and recovery fires; 0 means the
+ *  anomaly never confirms (detection-only). fsw-core hard-codes no
+ *  thresholds — they are mission tuning, supplied like the datapool
+ *  parameter set or the mode set. */
+typedef struct {
+    migris_fdir_anomaly_t anomaly;
+    uint16_t threshold;
+} migris_fdir_confirm_def_t;
+
 /** FDIR state. Caller-owned, zero-initialised once at startup (or via
- *  ``migris_fdir_init``). This slice holds only the event FIFO (the
- *  outbox); recovery state arrives with its first consumer. */
+ *  ``migris_fdir_init``). Holds the event FIFO (the outbox) and, since
+ *  slice fsw-14, the isolation/recovery state: per-anomaly occurrence
+ *  counters, confirmation thresholds, a per-anomaly confirmation latch,
+ *  and the wiring to the mode manager for the autonomous safe-mode
+ *  transition. The recovery fields are zero (no recovery) until
+ *  ``migris_fdir_arm_recovery`` is called. */
 typedef struct {
     migris_event_fifo_t fifo;
+    uint16_t occurrences[MIGRIS_FDIR_ANOMALY_COUNT]; /**< Saturating per-anomaly count. */
+    uint16_t
+        thresholds[MIGRIS_FDIR_ANOMALY_COUNT];    /**< Per-anomaly confirm threshold; 0 = never. */
+    uint8_t confirmed[MIGRIS_FDIR_ANOMALY_COUNT]; /**< Latched once recovery has fired. */
+    migris_mode_manager_t* mode; /**< Recovery target manager; NULL = no recovery. */
+    migris_mode_id_t safe_mode;  /**< Mode FDIR commands on a confirmed fault. */
+    int recovery_enabled;        /**< 1 = recovery armed, 0 = suppressed (commissioning). */
 } migris_fdir_ctx_t;
 
-/** Reset an FDIR context to empty. A zero-initialised
+/** Reset an FDIR context to empty, with recovery disarmed (no
+ *  thresholds, no mode manager). A zero-initialised
  *  ``migris_fdir_ctx_t`` is already valid; this is provided for
- *  explicitness at startup. */
+ *  explicitness at startup. Arm recovery afterwards with
+ *  ``migris_fdir_arm_recovery``. */
 void migris_fdir_init(migris_fdir_ctx_t* ctx);
+
+/** Arm FDIR isolation/recovery. Call after ``migris_fdir_init``.
+ *
+ *  ``mode`` is the mode manager FDIR commands on a confirmed fault
+ *  (it may be NULL — then a fault still counts and latches but no
+ *  transition is commanded); ``safe_mode`` is the mode it requests.
+ *  ``confirms`` supplies per-anomaly thresholds — an anomaly absent
+ *  from the array keeps threshold 0 (never confirms, detection-only).
+ *  Resets the occurrence counters and confirmation latches and enables
+ *  recovery. Returns ``MIGRIS_EVENT_FIFO_OK``, or
+ *  ``MIGRIS_EVENT_FIFO_ERR_BAD_ARG`` on a NULL ``ctx``, a NULL
+ *  ``confirms`` with ``n_confirms`` > 0, or a confirm-def naming an
+ *  anomaly outside ``migris_fdir_anomaly_t``. */
+int migris_fdir_arm_recovery(migris_fdir_ctx_t* ctx,
+                             migris_mode_manager_t* mode,
+                             migris_mode_id_t safe_mode,
+                             const migris_fdir_confirm_def_t* confirms,
+                             size_t n_confirms);
+
+/** Enable (the armed default) or suppress FDIR recovery. While
+ *  suppressed a confirmed anomaly still counts, still latches, and
+ *  still downlinks its PUS-5 anomaly report — but FDIR emits no
+ *  FDIR_RECOVERY event and commands no mode transition. For
+ *  commissioning, where a confirmed fault must not safe the vehicle. */
+void migris_fdir_set_enabled(migris_fdir_ctx_t* ctx, int enabled);
+
+/** Non-zero iff FDIR recovery is currently armed and enabled. */
+int migris_fdir_is_enabled(const migris_fdir_ctx_t* ctx);
 
 /** Build a borrowed event-sink view onto ``ctx``, for a generic
  *  producer (the TC router) that reports an anomaly it has already

@@ -8,6 +8,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-14: FDIR isolation and recovery.** Completes the
+  fault-management story fsw-8 began — FDIR now *acts* on a fault, not
+  only reports it. Each anomaly accumulates a saturating occurrence
+  count; when it crosses an application-supplied **threshold** the
+  fault is *confirmed* — a single transient never recovers (debounce) —
+  and FDIR autonomously commands a transition to a safe mode through
+  the fsw-13 mode manager and emits a high-severity PUS-5
+  **`FDIR_RECOVERY`** event (event ID `0x0005`; aux = anomaly type,
+  commanded safe-mode ID, and the occurrence count at confirmation).
+  `lib/fdir/` gains the isolation/recovery state in
+  `migris_fdir_ctx_t` (per-anomaly occurrence counters, thresholds, a
+  confirmation latch, a nullable `migris_mode_manager_t*` and the
+  safe-mode ID), `migris_fdir_arm_recovery` (the application supplies
+  the per-anomaly thresholds, like the datapool parameter set or the
+  mode set), and `migris_fdir_set_enabled` / `migris_fdir_is_enabled`
+  (suppress recovery for commissioning). Confirmation hooks **both**
+  anomaly entry points — the typed `migris_fdir_report_anomaly` and
+  the generic event sink — so a `TC_REJECTED` counts toward
+  confirmation whether the RX-overflow detector or the TC router
+  produced it. The `tc_uart` sample, under a new
+  `CONFIG_FSW_FDIR_RECOVERY_DEMO` Kconfig, arms recovery to SAFE after
+  `CONFIG_FSW_FDIR_TC_REJECTED_THRESHOLD` rejected telecommands; the
+  Renode housekeeping build turns it on for a genuine closed-loop —
+  send malformed TCs, watch the spacecraft safe itself. New
+  isolation/recovery suite in `tests/fdir_test.cpp`;
+  `tests/renode/test_tc_uart_hk.py` gains the recovery round-trip. The
+  event ID is added to [`docs/wire/pus-5.md`](docs/wire/pus-5.md) — a
+  non-breaking addition within the reserved framework block. Scoped
+  decisions:
+  - **FDIR depends on the mode manager directly — no recovery-action
+    seam.** A confirmed fault commanding a safe mode *is* FDIR's job;
+    the mode manager is a generic primitive FDIR consumes, not a
+    policy needing decoupling (contrast the event-sink seam, which
+    keeps the *generic* TC router free of fault policy). A
+    recovery-action vtable would be a one-implementation abstraction —
+    speculative. *Trigger*: a second recovery action (a subsystem
+    power-cycle, a reconfiguration) earns the seam.
+  - **Plain occurrence count, not a sliding time window.** A lifetime
+    count crossing a threshold is the minimal correct debounce and a
+    genuine fault signal. A time-windowed count is a tightening for a
+    mission whose transient-anomaly rate would false-trigger a
+    lifetime count. *Trigger*: such a mission profile.
+  - **Per-anomaly threshold, application-supplied.** The anomaly
+    registry owns *classification* (severity, event ID); *policy* (the
+    threshold) is mission tuning, supplied at
+    `migris_fdir_arm_recovery`, never hard-coded in framework code. A
+    threshold of 0 means the anomaly never confirms (detection-only —
+    the fsw-8 behaviour).
+  - **Enable/disable is a C API flag, not a datapool parameter.**
+    `lib/fdir/` must not depend on `lib/datapool/`; whether to expose
+    FDIR-enable to ground as a PUS-20 parameter is a sample/mission
+    choice, wired sample-side with no `lib/fdir/` change.
+  - **Recovery latches once per anomaly per boot.** A confirmed fault
+    that already safed the vehicle does not re-command SAFE on every
+    further occurrence; detection (the PUS-5 anomaly report)
+    continues. *Trigger*: a mission needing re-armable recovery —
+    which needs persistence first.
+  - **Persistence across reset deferred.** The occurrence counters and
+    the confirmation latch are RAM-only and reset on reboot, like
+    every other framework store. *Trigger*: the first
+    non-volatile-storage slice.
 - **Slice fsw-13: operating-mode manager.** The framework's first
   operating-state abstraction — a generic mode / state-machine
   primitive. A spacecraft runs in one of a small set of operating
