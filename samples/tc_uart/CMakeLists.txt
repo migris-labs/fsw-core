@@ -13,6 +13,7 @@ set(MIGRIS_FSW_FDIR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/fdir)
 set(MIGRIS_FSW_DATAPOOL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/datapool)
 set(MIGRIS_FSW_SCHEDULE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/schedule)
 set(MIGRIS_FSW_PKTSTORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/pktstore)
+set(MIGRIS_FSW_LARGEDATA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/largedata)
 
 target_sources(
   app
@@ -27,18 +28,21 @@ target_sources(
           ${MIGRIS_FSW_PUS_DIR}/src/pus11.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus15.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus20.c
+          ${MIGRIS_FSW_PUS_DIR}/src/pus13.c
           ${MIGRIS_FSW_PUS_DIR}/src/tc_router.c
           ${MIGRIS_FSW_FDIR_DIR}/src/event_fifo.c
           ${MIGRIS_FSW_FDIR_DIR}/src/fdir.c
           ${MIGRIS_FSW_DATAPOOL_DIR}/src/datapool.c
           ${MIGRIS_FSW_SCHEDULE_DIR}/src/schedule.c
-          ${MIGRIS_FSW_PKTSTORE_DIR}/src/pktstore.c)
+          ${MIGRIS_FSW_PKTSTORE_DIR}/src/pktstore.c
+          ${MIGRIS_FSW_LARGEDATA_DIR}/src/largedata.c)
 
 target_include_directories(app PRIVATE ${MIGRIS_FSW_PUS_DIR}/include
                                        ${MIGRIS_FSW_FDIR_DIR}/include
                                        ${MIGRIS_FSW_DATAPOOL_DIR}/include
                                        ${MIGRIS_FSW_SCHEDULE_DIR}/include
-                                       ${MIGRIS_FSW_PKTSTORE_DIR}/include)
+                                       ${MIGRIS_FSW_PKTSTORE_DIR}/include
+                                       ${MIGRIS_FSW_LARGEDATA_DIR}/include)
 
 # Size the freestanding event FIFO, the parameter datapool, the
 # schedule store, the packet store, and the PUS-20 / PUS-11 per-TC

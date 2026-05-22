@@ -125,3 +125,19 @@ config FSW_PKTSTORE_PACKET_MAX
 	  packet through the shared 128-byte router output buffer
 	  (MIGRIS_TC_ROUTER_MAX_TM); the floor (80) stays clear of the
 	  largest baseline TM packet (a PUS-20[2] value report).
+
+config FSW_LARGEDATA_DEMO
+	bool "Run a PUS-13 large-data downlink demo at boot"
+	default n
+	help
+	  When set, the tc_uart sample starts one PUS-13 large-data
+	  transfer at boot: a synthetic data unit is downlinked as an
+	  ordered sequence of [13,1] / [13,2] / [13,3] part packets, one
+	  part per main-loop iteration. PUS-13 (lib/pus/pus13.{h,c} +
+	  lib/largedata/) has no inbound telecommand, so a closed-loop
+	  test cannot trigger a transfer the way it triggers PUS-11 or
+	  PUS-15 — the demo is the observable surface for the reassembly
+	  closed-loop in tests/renode/test_tc_uart_hk.py. Left off by
+	  default: the verification-stream ELF (test_tc_uart.py) reads a
+	  fixed byte count per stimulus and must not see unsolicited
+	  large-data telemetry. The Renode housekeeping build turns it on.

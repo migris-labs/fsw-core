@@ -172,12 +172,14 @@ jobs:
             artefact: fsw-core-tc-nucleo_h753zi
             cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=86400"
           # Housekeeping ELF: same sample, short period so the periodic
-          # PUS-3[25] cadence is fast and deterministic (test_tc_uart_hk.py).
+          # PUS-3[25] cadence is fast and deterministic, and the PUS-13
+          # large-data demo enabled so the fsw-12 reassembly closed-loop
+          # has an observable transfer (test_tc_uart_hk.py).
           - name: samples/tc_uart (hk)
             path: samples/tc_uart
             build_dir: zephyr-tc-hk
             artefact: fsw-core-tc-hk-nucleo_h753zi
-            cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=2"
+            cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=2 -DCONFIG_FSW_LARGEDATA_DEMO=y"
     env:
       ZEPHYR_SDK_VERSION: "0.16.8"
     steps:

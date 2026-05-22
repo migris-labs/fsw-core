@@ -39,11 +39,14 @@ from _pus import (
     PUS_3_SUBTYPE_HK_PARAM_REPORT,
     PUS_5_SUBTYPE_INFO,
     PUS_11_SUBTYPE_SUMMARY_REPORT,
+    PUS_13_SUBTYPE_FIRST_PART,
+    PUS_13_SUBTYPE_LAST_PART,
     PUS_15_SUBTYPE_STORE_REPORT,
     PUS_17_SUBTYPE_ARE_YOU_ALIVE_TM,
     PUS_20_SUBTYPE_VALUE_REPORT,
     PUS_SERVICE_EVENT_REPORTING,
     PUS_SERVICE_HOUSEKEEPING,
+    PUS_SERVICE_LARGE_DATA,
     PUS_SERVICE_ONBOARD_PARAMETER,
     PUS_SERVICE_SCHEDULING,
     PUS_SERVICE_STORAGE,
@@ -67,8 +70,10 @@ from _pus import (
     build_pus20_report_request_tc,
     build_pus20_set_request_tc,
     decode_pus11_summary_report,
+    decode_pus13_part,
     decode_pus15_store_report,
     decode_pus20_report,
+    reassemble_pus13,
     split_packets,
 )
 from conftest import _RENODE_BIN, _TC_HK_ELF, tc_hk_running  # noqa: F401
@@ -136,8 +141,8 @@ def _assert_boot_first(tms: list[DecodedTm]) -> None:
 
 def test_periodic_hk_report_appears(tc_hk_running) -> None:  # noqa: F811
     """With no TC sent, the FSW spontaneously emits a well-formed
-    PUS-3[25] framework housekeeping report one period after boot, at
-    shared sequence count 1 (the boot event consumed 0)."""
+    PUS-3[25] framework housekeeping report a period after boot, on
+    the shared per-APID sequence count, after the boot event."""
     _, uart = tc_hk_running
 
     tms, hk = _collect(
@@ -148,7 +153,11 @@ def test_periodic_hk_report_appears(tc_hk_running) -> None:  # noqa: F811
     assert hk.primary.type == PACKET_TYPE_TM
     assert hk.primary.apid == FSW_APID
     assert hk.primary.seq_flags == SEQ_FLAGS_UNSEGMENTED
-    assert hk.primary.seq_count == 1  # boot consumed 0, no TC in between
+    # The boot event consumed sequence count 0; the housekeeping build
+    # also downlinks the fsw-12 PUS-13 large-data demo at boot, so the
+    # first report's exact count is not pinned — only that it follows
+    # the boot event. Strict monotonicity is the cadence test's job.
+    assert hk.primary.seq_count >= 1
     assert hk.secondary.pus_version == PUS_VERSION_C
     assert hk.secondary.destination_id == 0  # spontaneous, no triggering TC
     assert hk.pus3_sid == PUS3_SID_FRAMEWORK_DIAG
@@ -509,3 +518,52 @@ def test_pus15_disable_then_reenable_round_trips_storage_state(  # noqa: F811
     assert disabled_report.crc_ok and enabled_report.crc_ok
     assert not decode_pus15_store_report(disabled_report).enabled
     assert decode_pus15_store_report(enabled_report).enabled
+
+
+# The byte ramp the tc_uart sample downlinks when the PUS-13 large-data
+# demo is enabled (CONFIG_FSW_LARGEDATA_DEMO, on for this build):
+# LARGEDATA_DEMO_UNIT_LEN bytes, byte i == i & 0xFF. Kept here so the
+# expected payload is legible next to the assertion.
+LARGEDATA_DEMO_UNIT_LEN = 200
+
+
+def test_pus13_large_data_downlink_reassembles(tc_hk_running) -> None:  # noqa: F811
+    """The slice fsw-12 headline: the FSW downlinks a data unit too
+    large for one Space Packet as an ordered sequence of PUS-13 part
+    packets, and the ground reassembles it from the part header. The
+    housekeeping build runs one demo transfer at boot; collecting its
+    [13,1] / [13,2] / [13,3] parts and concatenating their payloads in
+    part-number order reproduces the sample's byte ramp exactly."""
+    _, uart = tc_hk_running
+
+    def all_parts(tms: list[DecodedTm]):
+        parts = [t for t in tms if t.secondary.service_type == PUS_SERVICE_LARGE_DATA]
+        if not parts:
+            return None
+        # Every part declares the transfer's total; wait for them all.
+        total = decode_pus13_part(parts[0]).total_parts
+        return parts if len(parts) >= total else None
+
+    tms, parts = _collect(uart, all_parts, timeout=60.0)
+    _assert_boot_first(tms)
+
+    decoded = [decode_pus13_part(p) for p in parts]
+    by_number = {d.part_number: p for d, p in zip(decoded, parts)}
+    txn = decoded[0].transaction_id
+    total = decoded[0].total_parts
+
+    # One transaction, one consistent part count, gapless numbering.
+    assert all(d.transaction_id == txn for d in decoded)
+    assert all(d.total_parts == total for d in decoded)
+    assert sorted(by_number) == list(range(total))
+    assert all(p.crc_ok for p in parts)
+    assert all(p.primary.apid == FSW_APID for p in parts)
+
+    # The first part is [13,1], the last is [13,3].
+    assert by_number[0].secondary.service_subtype == PUS_13_SUBTYPE_FIRST_PART
+    assert by_number[total - 1].secondary.service_subtype == PUS_13_SUBTYPE_LAST_PART
+
+    # Reassembled in part-number order, the payloads are the sample's ramp.
+    assert reassemble_pus13(parts) == bytes(
+        i & 0xFF for i in range(LARGEDATA_DEMO_UNIT_LEN)
+    )

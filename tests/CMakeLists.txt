@@ -12,12 +12,14 @@ add_executable(
   pus11_test.cpp
   pus15_test.cpp
   pus20_test.cpp
+  pus13_test.cpp
   tc_router_test.cpp
   event_fifo_test.cpp
   fdir_test.cpp
   datapool_test.cpp
   schedule_test.cpp
-  pktstore_test.cpp)
+  pktstore_test.cpp
+  largedata_test.cpp)
 
 target_link_libraries(fsw-core-tests PRIVATE migris::fsw-core GTest::gtest GTest::gtest_main)
 

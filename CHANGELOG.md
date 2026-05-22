@@ -8,6 +8,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-12: PUS-13 large data transfer (downlink).** The
+  framework's first mechanism for downlinking a unit of data larger
+  than a single CCSDS Space Packet — a schedule detail report, a
+  window of stored telemetry, a payload product. A new stateless C
+  codec `lib/pus/pus13.{h,c}` builds one [13,1] first / [13,2]
+  intermediate / [13,3] last downlink **part** packet per call; a new
+  freestanding C subtree `lib/largedata/` (with its own C-friendly
+  `.clang-tidy`) carries the **large-data downlink session** that
+  drives it — a cursor over a borrowed, caller-owned data unit that
+  slices the unit into `MIGRIS_PUS13_PART_SIZE`-byte chunks (64 by
+  default) and emits one part per call, so the application's main loop
+  drips a transfer out one packet per iteration, the same shape the
+  PUS-15 retrieval drain uses. Every part carries a 6-byte **part
+  header** — transaction identifier, 0-based part number, total part
+  count — which is the authoritative reassembly key. The `tc_uart`
+  sample, under a new `CONFIG_FSW_LARGEDATA_DEMO` Kconfig, starts one
+  transfer of a synthetic byte-ramp unit at boot and drains one part
+  per iteration through `transmit_tm` (parts are live TM, tapped into
+  the packet store like any other telemetry); the Renode housekeeping
+  build turns the demo on so the reassembly closed-loop has an
+  observable transfer. New host suites `tests/pus13_test.cpp` and
+  `tests/largedata_test.cpp`; `tests/tc_router_test.cpp` extended;
+  `tests/renode/test_tc_uart_hk.py` gains a part-reassembly
+  closed-loop. Wire format pinned in
+  [`docs/wire/pus-13.md`](docs/wire/pus-13.md). Scoped decisions:
+  - **Pragmatic downlink subset.** Only the downlink direction, and
+    within it only [13,1] / [13,2] / [13,3]. The uplink direction is
+    excluded — no on-board feature ingests a data unit larger than one
+    Space Packet (the largest inbound TC is a 192-byte PUS-11[4]
+    insert); the [13,16] downlink-abort report is excluded — nothing
+    in this slice can interrupt a transfer in progress; concurrent
+    transactions are excluded — one session at a time. *Triggers to
+    revisit*, respectively: the first consumer of a large uplinked
+    unit; the first slice where a transfer can be interrupted (a
+    closing pass window); a second concurrent producer of large data.
+  - **Telemetry-only — the TC router is untouched.** PUS-13 has no
+    inbound subtype, so service 13 is added neither to the accept-stage
+    whitelist nor to the dispatch table — a service-13 TC is rejected
+    `UNKNOWN_SERVICE` (a new `tc_router_test.cpp` test pins this).
+    Wiring a `largedata` pointer into the router context would be
+    speculative — nothing in the router consumes it — so the PUS-13
+    message counters live inside the session itself, exactly as the
+    `tc_uart` sample already keeps a local PUS-3 context for its
+    spontaneous periodic reports.
+  - **CCSDS sequence flags stay UNSEGMENTED.** PUS-13 segmentation is
+    a service-layer concern carried by the part header; each part is a
+    complete, standalone Space Packet. The framework's single-APID
+    interleaving (housekeeping, events, verification and parts share
+    one TM sequence-count space) means CCSDS-level segment reassembly
+    would be incorrect — reassembly is by the part header alone.
+  - **PUS-15 retrieval stays a verbatim replay.** fsw-11's [15,9]
+    by-time retrieval still re-emits stored packets verbatim; rewiring
+    it to chunk a window through a PUS-13 session is a breaking change
+    to `docs/wire/pus-15.md` and is kept a separate, deliberate slice.
+    fsw-12 ships PUS-13 as an independent primitive. *Trigger*: a
+    retrieval that must be downlinked as one reassemblable unit rather
+    than a packet replay.
+  - **The demo is Kconfig-gated.** PUS-13 has no inbound telecommand,
+    so a closed-loop test cannot trigger a transfer the way it triggers
+    PUS-11 or PUS-15; the sample runs one demo transfer at boot behind
+    `CONFIG_FSW_LARGEDATA_DEMO` (default off). The verification-stream
+    ELF leaves it off — `test_tc_uart.py` reads a fixed byte count per
+    stimulus and must not see unsolicited telemetry; the housekeeping
+    ELF turns it on. `test_tc_uart_hk.py`'s first-housekeeping-report
+    test accordingly drops its exact-sequence-count assertion (the
+    boot-time demo now precedes the first report) — an intended slice
+    consequence, like the fsw-6 boot-event rebase, not a regression.
 - **Slice fsw-11: on-board packet store + PUS-15 storage and
   retrieval.** The framework's first mass-memory primitive — the
   produce-on-orbit / downlink-next-pass model a spacecraft needs
