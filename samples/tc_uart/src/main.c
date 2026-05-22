@@ -110,6 +110,19 @@
  * The frozen FRAMEWORK_DIAG report is unchanged. Wire format is pinned
  * in docs/wire/pus-3.md.
  *
+ * Slice fsw-16 adds non-volatile parameter storage. The board's
+ * 256 KB storage_partition (= two STM32H7 flash sectors) becomes an
+ * A/B-redundant NVM image managed by lib/nvstore/, with the Zephyr
+ * flash_area_* backend in nv_flash_backend.c. At boot the datapool's
+ * persisted values are restored over the Kconfig defaults; in the main
+ * loop, a successful PUS-20[3] set bumps the datapool's generation
+ * counter and the next iteration's save tick writes the new image to
+ * the older flash sector — one coalesced write per batch of sets. A
+ * power loss mid-write leaves the previous (intact) copy in the other
+ * sector. No new PUS service, no wire change; persistence rides on the
+ * existing PUS-20 set/report. On-flash image format is pinned in
+ * docs/nv-image-format.md.
+ *
  * Single producer (the RX IRQ) and single consumer (main thread)
  * make ring_buf safe without explicit locking. We send TM with
  * blocking ``uart_poll_out`` — this slice has no concurrent TX
@@ -130,6 +143,7 @@
 #include "migris/fsw/hkstore/hkstore.h"
 #include "migris/fsw/largedata/largedata.h"
 #include "migris/fsw/mode/mode.h"
+#include "migris/fsw/nvstore/nvstore.h"
 #include "migris/fsw/pktstore/pktstore.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus11.h"
@@ -139,6 +153,8 @@
 #include "migris/fsw/pus/pus5.h"
 #include "migris/fsw/pus/tc_router.h"
 #include "migris/fsw/schedule/schedule.h"
+
+#include "nv_flash_backend.h"
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -223,6 +239,16 @@ static migris_pktstore_t store;
  * MIGRIS_HKSTORE_CAPACITY structures — too large for the main() stack.
  * RAM-only and volatile: empty after every reboot. */
 static migris_hkstore_t hkstore;
+
+/* Non-volatile parameter store (slice fsw-16). On boot, the datapool's
+ * persisted values are restored from flash; in the main loop, a
+ * successful PUS-20[3] set bumps the datapool's generation counter,
+ * which triggers a single coalesced save to flash. File-scope because
+ * the in-RAM payload buffer alone is ~512 B (too large for the main()
+ * stack), and the backend keeps file-scope state of its own. */
+static migris_nvstore_t nvstore;
+static migris_nv_backend_t nv_backend;
+static uint8_t nv_buf[64]; /* the datapool record is ~20 B today; ample headroom. */
 
 #ifdef CONFIG_FSW_LARGEDATA_DEMO
 /* On-board large-data downlink session (slice fsw-12). PUS-13 has no
@@ -426,6 +452,24 @@ int main(void) {
     (void)migris_datapool_init(&datapool, dp_params, sizeof(dp_params) / sizeof(dp_params[0]));
     ctx.datapool = &datapool;
 
+    /* Slice fsw-16: non-volatile parameter persistence. Open the
+     * board's storage_partition through the Zephyr flash backend,
+     * attach it to the nvstore, load any prior image and — if a
+     * DATAPOOL record is present — restore its values over the
+     * Kconfig defaults seeded above. Best-effort: a missing or
+     * corrupted image leaves the datapool at its defaults, exactly
+     * the first-boot behaviour. */
+    nv_backend = migris_fsw_nv_flash_backend();
+    migris_nvstore_init(&nvstore, &nv_backend);
+    if (migris_nvstore_load(&nvstore) == MIGRIS_NVSTORE_OK) {
+        const uint8_t* dp_bytes = NULL;
+        uint16_t dp_len = 0U;
+        if (migris_nvstore_get(&nvstore, MIGRIS_NVSTORE_RECORD_DATAPOOL, &dp_bytes, &dp_len) ==
+            MIGRIS_NVSTORE_OK) {
+            (void)migris_datapool_deserialize(&datapool, dp_bytes, dp_len);
+        }
+    }
+
     /* Slice fsw-10: the on-board schedule. A routed PUS-11 TC inserts
      * time-tagged telecommands; the release tick in the loop below
      * dispatches due ones. The schedule starts disabled — ground
@@ -575,12 +619,42 @@ int main(void) {
      * FIFO producer) reports the *delta* as an RX_OVERFLOW anomaly. */
     uint32_t last_reported_rx_drops = 0U;
 
+    /* Last datapool generation persisted to flash (slice fsw-16). The
+     * datapool bumps its generation counter on every successful
+     * `migris_datapool_set`; the loop's save tick below saves only when
+     * the current generation differs from this snapshot, so a batch of
+     * back-to-back sets coalesces into one flash write. Initialised to
+     * the post-load generation (0 if no image, 0 also if an image was
+     * loaded — deserialize is a restore, not a set, so it does not
+     * bump). */
+    uint32_t last_saved_gen = migris_datapool_generation(&datapool);
+
     for (;;) {
         /* One FSW-clock read per iteration, reused by the periodic
          * report and the TC dispatch (the full TC completes in the
          * same iteration its final byte arrives, microseconds after
          * this read — coarse seconds are unaffected). */
         const uint32_t now_sec = (uint32_t)(k_uptime_get() / 1000);
+
+        /* Non-volatile save tick (slice fsw-16). The datapool bumps
+         * its generation counter on every successful set; if it has
+         * advanced since the last save, persist the new values now —
+         * one flash write per batch of changes, ahead of any other
+         * tick so the on-flash image always reflects state ground has
+         * already seen a PUS-1 completion for. The save is best-effort:
+         * a backend failure leaves `last_saved_gen` unchanged so the
+         * next iteration retries. */
+        const uint32_t cur_gen = migris_datapool_generation(&datapool);
+        if (cur_gen != last_saved_gen) {
+            const int dp_n = migris_datapool_serialize(&datapool, nv_buf, sizeof(nv_buf));
+            if (dp_n > 0 &&
+                migris_nvstore_put(
+                    &nvstore, MIGRIS_NVSTORE_RECORD_DATAPOOL, nv_buf, (uint16_t)dp_n) ==
+                    MIGRIS_NVSTORE_OK &&
+                migris_nvstore_save(&nvstore) == MIGRIS_NVSTORE_OK) {
+                last_saved_gen = cur_gen;
+            }
+        }
 
         /* Spontaneous periodic housekeeping (slice fsw-7). Checked
          * every iteration — including the idle path below, where most
