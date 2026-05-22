@@ -145,6 +145,10 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/ring_buffer.h>
 
+#ifdef CONFIG_FSW_NV_FLASH_SELFTEST
+#    include <zephyr/storage/flash_map.h>
+#endif
+
 /* USART3 is the platform-pinned UART (same as the fsw-2 hello
  * sample). The board's ``zephyr,console`` choice points there by
  * default; we leave that alone — boot banner / printk / log are all
@@ -317,6 +321,65 @@ static void fill_hk_params(const migris_tc_router_ctx_t* router, migris_pus3_hk_
     p->rx_ring_overflow_drops = router->rx_ring_overflow_drops;
 }
 
+#ifdef CONFIG_FSW_NV_FLASH_SELFTEST
+/* Slice fsw-16 — on-chip flash self-test. Erase the first sector of
+ * the board's storage partition, write a known 32-byte pattern (the
+ * STM32H7 write granularity), read it back and compare. Returns 0 on
+ * success or a non-zero fail code; the result is emitted at boot as
+ * the 1-byte auxiliary of a PUS-5[1] FLASH_SELFTEST event.
+ *
+ * This is the fsw-16 step-1 derisk: it proves Renode's STM32H7 flash
+ * controller and Zephyr's flash_stm32h7x.c driver work end-to-end on
+ * the emulated board, before the non-volatile parameter store is built
+ * on top of them. Kept Kconfig-gated so it ships off by default; the
+ * Renode housekeeping build turns it on. */
+#    define FLASH_SELFTEST_OK 0U
+#    define FLASH_SELFTEST_FAIL_OPEN 1U
+#    define FLASH_SELFTEST_FAIL_ERASE 2U
+#    define FLASH_SELFTEST_FAIL_WRITE 3U
+#    define FLASH_SELFTEST_FAIL_READ 4U
+#    define FLASH_SELFTEST_FAIL_MISMATCH 5U
+#    define FLASH_SELFTEST_PATTERN_LEN 32U
+
+static uint8_t flash_selftest(void) {
+    const struct flash_area* fa = NULL;
+    if (flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa) != 0) {
+        return FLASH_SELFTEST_FAIL_OPEN;
+    }
+    /* Erase exactly the first sector of the partition. STM32H7 flash
+     * has 128 KB sectors and the storage partition starts at a sector
+     * boundary, so this erases sector 0 and leaves sector 1 untouched —
+     * the A/B image format the nvstore slice will lay on top of this
+     * partition writes one image per sector. */
+    if (flash_area_erase(fa, 0, 128U * 1024U) != 0) {
+        flash_area_close(fa);
+        return FLASH_SELFTEST_FAIL_ERASE;
+    }
+    static const uint8_t pattern[FLASH_SELFTEST_PATTERN_LEN] = {
+        'M',   'I',   'G',   'R',   'I',   'S',   0xDEU, 0xADU, 0xBEU, 0xEFU, 0x01U,
+        0x02U, 0x03U, 0x04U, 0x05U, 0x06U, 0x07U, 0x08U, 0x09U, 0x0AU, 0x0BU, 0x0CU,
+        0x0DU, 0x0EU, 0x0FU, 0x10U, 0x11U, 0x12U, 0x13U, 0x14U, 0x15U, 0x16U,
+    };
+    if (flash_area_write(fa, 0, pattern, sizeof(pattern)) != 0) {
+        flash_area_close(fa);
+        return FLASH_SELFTEST_FAIL_WRITE;
+    }
+    uint8_t readback[FLASH_SELFTEST_PATTERN_LEN] = {0};
+    if (flash_area_read(fa, 0, readback, sizeof(readback)) != 0) {
+        flash_area_close(fa);
+        return FLASH_SELFTEST_FAIL_READ;
+    }
+    for (size_t i = 0U; i < sizeof(pattern); ++i) {
+        if (readback[i] != pattern[i]) {
+            flash_area_close(fa);
+            return FLASH_SELFTEST_FAIL_MISMATCH;
+        }
+    }
+    flash_area_close(fa);
+    return FLASH_SELFTEST_OK;
+}
+#endif /* CONFIG_FSW_NV_FLASH_SELFTEST */
+
 int main(void) {
     if (!device_is_ready(uart_dev)) {
         /* Nothing to do without a UART — go idle. */
@@ -460,6 +523,33 @@ int main(void) {
     if (boot_n > 0) {
         transmit_tm(uart_dev, boot_sec, out, (size_t)boot_n);
     }
+
+#ifdef CONFIG_FSW_NV_FLASH_SELFTEST
+    /* Slice fsw-16 step 1: exercise the on-chip flash and emit a
+     * PUS-5[1] FLASH_SELFTEST event whose 1-byte aux is the status
+     * (0 = OK, non-zero = fail code). Runs once at boot, right after
+     * the boot event, so the per-APID sequence count stays monotonic.
+     * The closed-loop test in tests/renode/test_tc_uart_hk.py asserts
+     * a status of 0 — that is the slice's flash-driver-works derisk. */
+    {
+        const uint8_t status = flash_selftest();
+        const uint8_t aux[1] = {status};
+        const int self_n = migris_pus5_build_event_report(&ctx.pus5,
+                                                          ctx.apid,
+                                                          &ctx.tm_seq_count,
+                                                          boot_sec,
+                                                          MIGRIS_PUS5_SEV_INFO,
+                                                          MIGRIS_PUS5_EVT_FLASH_SELFTEST,
+                                                          aux,
+                                                          sizeof(aux),
+                                                          0U,
+                                                          out,
+                                                          sizeof(out));
+        if (self_n > 0) {
+            transmit_tm(uart_dev, boot_sec, out, (size_t)self_n);
+        }
+    }
+#endif
 
 #ifdef CONFIG_FSW_MODE_DEMO
     /* Slice fsw-13: the boot-time mode transition. Once the FSW is up,

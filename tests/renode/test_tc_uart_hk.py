@@ -60,6 +60,7 @@ from _pus import (
     PUS3_HK_SOURCE_DATA_SIZE,
     PUS3_SID_FRAMEWORK_DIAG,
     PUS5_EVT_FDIR_RECOVERY,
+    PUS5_EVT_FLASH_SELFTEST,
     PUS5_EVT_MODE_CHANGED,
     PUS15_STORE_REPORT_SOURCE_SIZE,
     SEQ_FLAGS_UNSEGMENTED,
@@ -782,3 +783,34 @@ def test_dynamic_housekeeping_structure_lifecycle(tc_hk_running) -> None:  # noq
         uart, lambda ts: _completion_success(ts, delete[:4]), timeout=60.0
     )
     assert completion.failure_code is None  # completion success
+
+
+# --- slice fsw-16 step 1: Renode flash de-risk -------------------------
+
+
+def test_flash_selftest_succeeds(tc_hk_running) -> None:  # noqa: F811
+    """The slice fsw-16 step-1 de-risk: with CONFIG_FSW_NV_FLASH_SELFTEST
+    set, the FSW at boot erases the first sector of the storage
+    partition, writes a 32-byte pattern, reads it back, and emits a
+    PUS-5[1] FLASH_SELFTEST event whose 1-byte aux is the status. A
+    status of 0 proves Renode's STM32H7 flash controller + Zephyr's
+    flash_stm32h7x.c driver work end-to-end on the emulated board —
+    the prerequisite the non-volatile parameter store builds on."""
+    _, uart = tc_hk_running
+
+    def find_selftest(tms: list[DecodedTm]):
+        return next(
+            (
+                t
+                for t in tms
+                if t.secondary.service_type == PUS_SERVICE_EVENT_REPORTING
+                and t.event_id == PUS5_EVT_FLASH_SELFTEST
+            ),
+            None,
+        )
+
+    _, ev = _collect(uart, find_selftest, timeout=60.0)
+    assert ev.secondary.service_subtype == PUS_5_SUBTYPE_INFO
+    assert ev.secondary.destination_id == 0  # spontaneous, no triggering TC
+    assert ev.event_aux == bytes([0])  # status = OK (0); non-zero = a fail code
+    assert ev.crc_ok

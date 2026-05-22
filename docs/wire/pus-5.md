@@ -63,9 +63,11 @@ mission-side numbering is deferred to its first consumer.
 | `0x0003` | `RX_OVERFLOW` | medium [3] | UART RX-ring overflow — inbound command bytes were dropped before forming a packet. Aux = 4 bytes: count of bytes dropped since the previous `RX_OVERFLOW` report, big-endian u32. |
 | `0x0004` | `MODE_CHANGED` | info [1]  | On-board operating mode changed. Aux = 2 bytes: the previous mode ID then the new mode ID (u8 each). Emitted by the mode manager (`lib/mode/`) on a successful transition. |
 | `0x0005` | `FDIR_RECOVERY` | high [4] | FDIR confirmed a fault and commanded an autonomous recovery. Aux = 4 bytes: the anomaly type, the commanded safe-mode ID, then the occurrence count at confirmation (big-endian u16). Emitted by `lib/fdir/` on the confirmation edge, before the `MODE_CHANGED` the recovery transition raises. |
+| `0x0006` | `FLASH_SELFTEST` | info [1] | On-chip flash self-test result. Aux = 1 byte: the status (`0` = OK, non-zero = a fail code — 1 open, 2 erase, 3 write, 4 read, 5 mismatch). Emitted at boot by the sample when `CONFIG_FSW_NV_FLASH_SELFTEST` is set, proving the flash driver works end-to-end before the non-volatile parameter store is built on top of it. |
 
 `0x0002` and `0x0003` are added by slice fsw-8, `0x0004` by slice
-fsw-13, `0x0005` by slice fsw-14. Adding an event ID within the
+fsw-13, `0x0005` by slice fsw-14, `0x0006` by slice fsw-16. Adding an
+event ID within the
 reserved `0x0001`–`0x00FF` block is **non-breaking** (see
 *Versioning* below). The severity column is the **single source of
 truth** for how each anomaly classifies on the wire (it selects the
