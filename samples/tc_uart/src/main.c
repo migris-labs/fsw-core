@@ -97,6 +97,19 @@
  * the verification-stream build. Wire format is pinned in
  * docs/wire/pus-5.md.
  *
+ * Slice fsw-15 adds dynamic PUS-3 housekeeping structures. A routed
+ * PUS-3 [3,1]/[3,2]/[3,5]/[3,6] TC creates, deletes, enables and
+ * disables ground-defined housekeeping structures, each selecting a
+ * list of datapool parameters; the main loop's emission tick turns an
+ * enabled, due structure into a datapool-backed PUS-3[25] report. The
+ * sample registers two read-only datapool parameters (a firmware
+ * version and a build identifier) so a ground-created structure has
+ * parameters to sample. No demo gate is needed — structure management
+ * is TC-driven and a created structure starts disabled, so the
+ * verification-stream build emits no unsolicited structure telemetry.
+ * The frozen FRAMEWORK_DIAG report is unchanged. Wire format is pinned
+ * in docs/wire/pus-3.md.
+ *
  * Single producer (the RX IRQ) and single consumer (main thread)
  * make ring_buf safe without explicit locking. We send TM with
  * blocking ``uart_poll_out`` — this slice has no concurrent TX
@@ -114,6 +127,7 @@
 
 #include "migris/fsw/datapool/datapool.h"
 #include "migris/fsw/fdir/fdir.h"
+#include "migris/fsw/hkstore/hkstore.h"
 #include "migris/fsw/largedata/largedata.h"
 #include "migris/fsw/mode/mode.h"
 #include "migris/fsw/pktstore/pktstore.h"
@@ -143,9 +157,19 @@ static const struct device* const uart_dev = DEVICE_DT_GET(UART_NODE);
 #define MIGRIS_FSW_APID 0x100U
 
 /* Framework datapool parameter IDs (reserved range 0x0001..0x00FF —
- * see docs/wire/pus-20.md). This sample registers exactly one: the
- * PUS-3 housekeeping period, made operator-tunable via PUS-20. */
+ * see docs/wire/pus-20.md). The PUS-3 housekeeping period is
+ * operator-tunable via PUS-20; the firmware-identity parameters are
+ * read-only observability values a ground-created PUS-3 housekeeping
+ * structure (slice fsw-15) can sample. */
 #define MIGRIS_FSW_PARAM_HK_PERIOD_SEC 0x0001U
+#define MIGRIS_FSW_PARAM_FW_VERSION 0x0002U  /* read-only u16, major<<8 | minor */
+#define MIGRIS_FSW_PARAM_FW_BUILD_ID 0x0003U /* read-only u32, build identifier */
+
+/* Firmware-identity values surfaced through the read-only datapool
+ * parameters above. The version mirrors the migris-fsw-core project
+ * version; the build identifier is the slice date (YYYYMMDD, hex). */
+#define MIGRIS_FSW_FW_VERSION 0x0001U
+#define MIGRIS_FSW_FW_BUILD_ID 0x20260522U
 
 /* Largest TC we will buffer. The biggest in the baseline is a
  * PUS-11[4] insert carrying scheduled telecommands; 192 admits an
@@ -186,6 +210,15 @@ static migris_schedule_t schedule;
  * MIGRIS_PKTSTORE_CAPACITY packets — far too large for the main()
  * stack. RAM-only and volatile: empty after every reboot. */
 static migris_pktstore_t store;
+
+/* On-board housekeeping-structure store (slice fsw-15). A routed PUS-3
+ * [3,1]/[3,2]/[3,5]/[3,6] TC creates, deletes, enables and disables
+ * ground-defined housekeeping structures here; the emission tick in
+ * the main loop turns an enabled, due structure into a datapool-backed
+ * PUS-3[25] report. File-scope because the store holds up to
+ * MIGRIS_HKSTORE_CAPACITY structures — too large for the main() stack.
+ * RAM-only and volatile: empty after every reboot. */
+static migris_hkstore_t hkstore;
 
 #ifdef CONFIG_FSW_LARGEDATA_DEMO
 /* On-board large-data downlink session (slice fsw-12). PUS-13 has no
@@ -319,6 +352,12 @@ int main(void) {
         {MIGRIS_FSW_PARAM_HK_PERIOD_SEC,
          MIGRIS_DP_ACCESS_READ_WRITE,
          migris_dp_u32((uint32_t)CONFIG_FSW_PUS3_HK_PERIOD_SEC)},
+        {MIGRIS_FSW_PARAM_FW_VERSION,
+         MIGRIS_DP_ACCESS_READ_ONLY,
+         migris_dp_u16(MIGRIS_FSW_FW_VERSION)},
+        {MIGRIS_FSW_PARAM_FW_BUILD_ID,
+         MIGRIS_DP_ACCESS_READ_ONLY,
+         migris_dp_u32(MIGRIS_FSW_FW_BUILD_ID)},
     };
     migris_datapool_t datapool;
     (void)migris_datapool_init(&datapool, dp_params, sizeof(dp_params) / sizeof(dp_params[0]));
@@ -338,6 +377,14 @@ int main(void) {
      * leaves storage ENABLED, so telemetry is captured from boot. */
     migris_pktstore_init(&store);
     ctx.store = &store;
+
+    /* Slice fsw-15: the on-board housekeeping-structure store. A routed
+     * PUS-3 structure-management TC creates / enables structures here;
+     * the emission tick in the loop below turns an enabled, due
+     * structure into a datapool-backed dynamic PUS-3[25] report. The
+     * store starts empty — ground defines structures with [3,1]. */
+    migris_hkstore_init(&hkstore);
+    ctx.hkstore = &hkstore;
 
 #ifdef CONFIG_FSW_LARGEDATA_DEMO
     /* Slice fsw-12: arm the PUS-13 large-data demo. The unit is a byte
@@ -478,6 +525,32 @@ int main(void) {
                 transmit_tm(uart_dev, now_sec, out, (size_t)hk_n);
             }
             last_hk_emit_sec = now_sec;
+        }
+
+        /* Dynamic housekeeping structures (slice fsw-15). A
+         * ground-created structure that is enabled and whose interval
+         * has elapsed is emitted as a datapool-backed PUS-3[25]
+         * report — one structure per iteration, reusing the shared
+         * out[] (fully transmitted before the loop proceeds). A
+         * structure naming a parameter the datapool lacks produces no
+         * packet — the encoder fails the whole report — and is retried
+         * at its next interval. The store is empty until ground
+         * defines a structure, so this is a no-op on the
+         * verification-stream build. */
+        const migris_hk_structure_t* due_struct = migris_hkstore_due(&hkstore, now_sec);
+        if (due_struct != NULL) {
+            const int dyn_n = migris_pus3_build_dynamic_hk_report(&pus3_ctx,
+                                                                  &datapool,
+                                                                  due_struct,
+                                                                  ctx.apid,
+                                                                  &ctx.tm_seq_count,
+                                                                  now_sec,
+                                                                  0U,
+                                                                  out,
+                                                                  sizeof(out));
+            if (dyn_n > 0) {
+                transmit_tm(uart_dev, now_sec, out, (size_t)dyn_n);
+            }
         }
 
         /* RX-overflow detector (slice fsw-8). The loop, not the ISR,

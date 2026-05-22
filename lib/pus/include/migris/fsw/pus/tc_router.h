@@ -53,8 +53,9 @@ extern "C" {
  *  single-TC burst is a PUS-1[1] acceptance report (22) + the routed
  *  service response + a PUS-1[7] completion report (22). The biggest
  *  service response is a PUS-20[2] parameter value report (67 for the
- *  maximum eight parameters, vs PUS-3[25]'s 47 and PUS-17[2]'s 18), so
- *  the worst case is 22 + 67 + 22 = 111, rounded up to 128. The
+ *  maximum eight parameters, vs the frozen PUS-3[25]'s 47, a dynamic
+ *  PUS-3[25]'s 52 for eight four-byte parameters, and PUS-17[2]'s 18),
+ *  so the worst case is 22 + 67 + 22 = 111, rounded up to 128. The
  *  caller's output buffer must be at least this large; the router
  *  checks once up front so no individual report can run out of space
  *  mid-burst. */
@@ -129,6 +130,17 @@ typedef struct {
      *  fails its completion stage with FC_EXEC_FAILURE, so callers
      *  that do not use PUS-15 are unaffected. */
     migris_pktstore_t* store;
+    /** On-board housekeeping-structure store, reached by a routed
+     *  PUS-3 structure-management TC ([3,1]/[3,2]/[3,5]/[3,6]) and by
+     *  a [3,27] poll of a dynamic structure. Caller-owned and borrowed,
+     *  held by pointer like ``datapool`` / ``schedule`` / ``store``.
+     *  NULL — the zero-initialised default — means no structure store
+     *  is wired on this AP: a routed structure-management TC then fails
+     *  its completion stage with FC_EXEC_FAILURE, and a [3,27] poll of
+     *  any SID other than the framework structure fails with
+     *  FC_UNKNOWN_SUBTYPE. The frozen FRAMEWORK_DIAG [3,27] poll is
+     *  unaffected — it needs no store. */
+    migris_hkstore_t* hkstore;
 } migris_tc_router_ctx_t;
 
 /** Result of the generic accept-stage validation. ``addressed`` is 0

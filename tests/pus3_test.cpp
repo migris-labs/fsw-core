@@ -3,6 +3,8 @@
 
 #include "migris/fsw/pus/pus3.h"
 
+#include "migris/fsw/datapool/datapool.h"
+#include "migris/fsw/hkstore/hkstore.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus_tm.h"
 
@@ -10,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 namespace migris::fsw::pus::test {
 namespace {
@@ -278,6 +281,264 @@ TEST(Pus3, RejectsNullArguments) {
         migris_pus3_build_hk_report(
             &ctx, test_apid, &seq, 0U, MIGRIS_PUS3_SID_FRAMEWORK_DIAG, &p, 0U, nullptr, tm.size()),
         MIGRIS_PUS3_ERR_BAD_ARG);
+}
+
+// --- Structure management (slice fsw-15) ---------------------------
+
+// Build [3,1] create application data: SID(2) + parameter-count(1) +
+// parameter ID(2 each) + interval(4), all big-endian.
+std::vector<std::uint8_t>
+create_app(std::uint16_t sid, const std::vector<std::uint16_t>& ids, std::uint32_t interval) {
+    std::vector<std::uint8_t> a;
+    a.push_back(static_cast<std::uint8_t>(sid >> 8));
+    a.push_back(static_cast<std::uint8_t>(sid & 0xFFU));
+    a.push_back(static_cast<std::uint8_t>(ids.size()));
+    for (const std::uint16_t id : ids) {
+        a.push_back(static_cast<std::uint8_t>(id >> 8));
+        a.push_back(static_cast<std::uint8_t>(id & 0xFFU));
+    }
+    a.push_back(static_cast<std::uint8_t>(interval >> 24));
+    a.push_back(static_cast<std::uint8_t>(interval >> 16));
+    a.push_back(static_cast<std::uint8_t>(interval >> 8));
+    a.push_back(static_cast<std::uint8_t>(interval & 0xFFU));
+    return a;
+}
+
+// SID-only application data — the payload of [3,2] / [3,5] / [3,6].
+std::array<std::uint8_t, 2U> sid_app(std::uint16_t sid) {
+    return {static_cast<std::uint8_t>(sid >> 8), static_cast<std::uint8_t>(sid & 0xFFU)};
+}
+
+migris_dp_param_t
+dp_param(migris_dp_param_id_t id, migris_dp_access_t access, migris_dp_value_t value) {
+    migris_dp_param_t out{};
+    out.id = id;
+    out.access = access;
+    out.value = value;
+    return out;
+}
+
+// A datapool with two read-only parameters of distinct types and
+// sentinel values, so a layout regression in the dynamic encoder is
+// unambiguous.
+migris_datapool_t dynamic_datapool() {
+    const std::array<migris_dp_param_t, 2U> params{
+        dp_param(0x0010U, MIGRIS_DP_ACCESS_READ_ONLY, migris_dp_u32(0xAABBCCDDU)),
+        dp_param(0x0011U, MIGRIS_DP_ACCESS_READ_ONLY, migris_dp_u16(0x1234U)),
+    };
+    migris_datapool_t dp{};
+    migris_datapool_init(&dp, params.data(), params.size());
+    return dp;
+}
+
+// A structure sampling the two dynamic_datapool() parameters.
+migris_hk_structure_t dynamic_structure() {
+    migris_hk_structure_t s{};
+    s.sid = 0x0100U;
+    s.param_ids[0] = 0x0010U;
+    s.param_ids[1] = 0x0011U;
+    s.param_count = 2U;
+    return s;
+}
+
+TEST(Pus3Execute, CreateAddsAStructureToTheStore) {
+    migris_hkstore_t store{};
+    migris_hkstore_init(&store);
+    const auto app = create_app(0x0100U, {0x0010U, 0x0011U}, 20U);
+    EXPECT_EQ(
+        migris_pus3_execute(&store, MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE, app.data(), app.size()),
+        MIGRIS_PUS3_OK);
+    const migris_hk_structure_t* s = migris_hkstore_find(&store, 0x0100U);
+    ASSERT_NE(s, nullptr);
+    EXPECT_EQ(s->param_count, 2U);
+    EXPECT_EQ(s->interval_sec, 20U);
+}
+
+TEST(Pus3Execute, CreateRejectsMalformedApplicationData) {
+    migris_hkstore_t store{};
+    migris_hkstore_init(&store);
+    auto app = create_app(0x0100U, {0x0010U}, 20U);
+    app.pop_back();  // one byte short of the declared layout
+    EXPECT_EQ(
+        migris_pus3_execute(&store, MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE, app.data(), app.size()),
+        MIGRIS_PUS3_ERR_BAD_ARG);
+    EXPECT_EQ(migris_hkstore_count(&store), 0U);
+}
+
+TEST(Pus3Execute, CreateRejectsAFrameworkRangeSid) {
+    migris_hkstore_t store{};
+    migris_hkstore_init(&store);
+    const auto app = create_app(0x0001U, {0x0010U}, 20U);  // 0x0001 is reserved
+    EXPECT_EQ(
+        migris_pus3_execute(&store, MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE, app.data(), app.size()),
+        MIGRIS_PUS3_ERR_EXEC_FAILED);
+}
+
+TEST(Pus3Execute, DeleteRemovesAStructure) {
+    migris_hkstore_t store{};
+    migris_hkstore_init(&store);
+    const auto created = create_app(0x0100U, {0x0010U}, 20U);
+    ASSERT_EQ(migris_pus3_execute(
+                  &store, MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE, created.data(), created.size()),
+              MIGRIS_PUS3_OK);
+    const auto sid = sid_app(0x0100U);
+    EXPECT_EQ(
+        migris_pus3_execute(&store, MIGRIS_PUS3_SUBTYPE_DELETE_STRUCTURE, sid.data(), sid.size()),
+        MIGRIS_PUS3_OK);
+    EXPECT_EQ(migris_hkstore_count(&store), 0U);
+}
+
+TEST(Pus3Execute, EnableAndDisableToggleAStructure) {
+    migris_hkstore_t store{};
+    migris_hkstore_init(&store);
+    const auto created = create_app(0x0100U, {0x0010U}, 20U);
+    ASSERT_EQ(migris_pus3_execute(
+                  &store, MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE, created.data(), created.size()),
+              MIGRIS_PUS3_OK);
+    const auto sid = sid_app(0x0100U);
+    ASSERT_EQ(
+        migris_pus3_execute(&store, MIGRIS_PUS3_SUBTYPE_ENABLE_STRUCTURE, sid.data(), sid.size()),
+        MIGRIS_PUS3_OK);
+    EXPECT_EQ(migris_hkstore_find(&store, 0x0100U)->enabled, 1);
+    ASSERT_EQ(
+        migris_pus3_execute(&store, MIGRIS_PUS3_SUBTYPE_DISABLE_STRUCTURE, sid.data(), sid.size()),
+        MIGRIS_PUS3_OK);
+    EXPECT_EQ(migris_hkstore_find(&store, 0x0100U)->enabled, 0);
+}
+
+TEST(Pus3Execute, DeleteOfUnknownSidFails) {
+    migris_hkstore_t store{};
+    migris_hkstore_init(&store);
+    const auto sid = sid_app(0x0100U);
+    EXPECT_EQ(
+        migris_pus3_execute(&store, MIGRIS_PUS3_SUBTYPE_DELETE_STRUCTURE, sid.data(), sid.size()),
+        MIGRIS_PUS3_ERR_EXEC_FAILED);
+}
+
+TEST(Pus3Execute, RejectsNonManagementSubtypeAndNullArguments) {
+    migris_hkstore_t store{};
+    migris_hkstore_init(&store);
+    const auto sid = sid_app(0x0100U);
+    // [3,27] poll is not a management subtype, nor is an unknown one.
+    EXPECT_EQ(
+        migris_pus3_execute(&store, MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL, sid.data(), sid.size()),
+        MIGRIS_PUS3_ERR_BAD_ARG);
+    EXPECT_EQ(migris_pus3_execute(&store, 99U, sid.data(), sid.size()), MIGRIS_PUS3_ERR_BAD_ARG);
+    EXPECT_EQ(
+        migris_pus3_execute(nullptr, MIGRIS_PUS3_SUBTYPE_DELETE_STRUCTURE, sid.data(), sid.size()),
+        MIGRIS_PUS3_ERR_BAD_ARG);
+    EXPECT_EQ(migris_pus3_execute(&store, MIGRIS_PUS3_SUBTYPE_DELETE_STRUCTURE, nullptr, 2U),
+              MIGRIS_PUS3_ERR_BAD_ARG);
+}
+
+TEST(Pus3Dynamic, ReportIsWellFormed) {
+    migris_pus3_ctx_t ctx{};
+    std::uint16_t seq = 0U;
+    const migris_datapool_t dp = dynamic_datapool();
+    const migris_hk_structure_t s = dynamic_structure();
+    std::array<std::uint8_t, 64U> tm{};
+
+    // primary 6 + TM sec 10 + source (SID 2 + u32 4 + u16 2) + CRC 2 = 26.
+    const int rc = migris_pus3_build_dynamic_hk_report(
+        &ctx, &dp, &s, test_apid, &seq, 0x01020304U, 0U, tm.data(), tm.size());
+    ASSERT_EQ(rc, 26);
+
+    const migris_ccsds_primary_header_t hp = primary_of(tm.data());
+    const migris_pus_tm_secondary_header_t sec = secondary_of(tm.data());
+    EXPECT_EQ(hp.type, MIGRIS_CCSDS_PACKET_TYPE_TM);
+    EXPECT_EQ(hp.apid, test_apid);
+    EXPECT_EQ(sec.service_type, MIGRIS_PUS_SERVICE_HOUSEKEEPING);
+    EXPECT_EQ(sec.service_subtype, MIGRIS_PUS3_SUBTYPE_HK_PARAM_REPORT);
+    EXPECT_EQ(sec.time_seconds, 0x01020304U);
+    EXPECT_TRUE(crc_ok(tm.data(), 26U));
+}
+
+TEST(Pus3Dynamic, SourceDataIsSidThenConcatenatedValues) {
+    migris_pus3_ctx_t ctx{};
+    std::uint16_t seq = 0U;
+    const migris_datapool_t dp = dynamic_datapool();
+    const migris_hk_structure_t s = dynamic_structure();
+    std::array<std::uint8_t, 64U> tm{};
+
+    ASSERT_GT(migris_pus3_build_dynamic_hk_report(
+                  &ctx, &dp, &s, test_apid, &seq, 0U, 0x4321U, tm.data(), tm.size()),
+              0);
+    EXPECT_EQ(u16_be(tm.data(), 0U), 0x0100U);      // Structure ID
+    EXPECT_EQ(u32_be(tm.data(), 2U), 0xAABBCCDDU);  // first parameter (u32)
+    EXPECT_EQ(u16_be(tm.data(), 6U), 0x1234U);      // second parameter (u16)
+    EXPECT_EQ(secondary_of(tm.data()).destination_id, 0x4321U);
+}
+
+TEST(Pus3Dynamic, RejectsAStructureNamingAnUnknownParameter) {
+    migris_pus3_ctx_t ctx{};
+    std::uint16_t seq = 9U;
+    const migris_datapool_t dp = dynamic_datapool();
+    migris_hk_structure_t s = dynamic_structure();
+    s.param_ids[1] = 0x0099U;  // not defined in the datapool
+    std::array<std::uint8_t, 64U> tm{};
+    EXPECT_EQ(migris_pus3_build_dynamic_hk_report(
+                  &ctx, &dp, &s, test_apid, &seq, 0U, 0U, tm.data(), tm.size()),
+              MIGRIS_PUS3_ERR_UNKNOWN_PARAM);
+    EXPECT_EQ(seq, 9U);  // failed before any state advance
+}
+
+TEST(Pus3Dynamic, RejectsATooSmallBuffer) {
+    migris_pus3_ctx_t ctx{};
+    std::uint16_t seq = 3U;
+    const migris_datapool_t dp = dynamic_datapool();
+    const migris_hk_structure_t s = dynamic_structure();
+    std::array<std::uint8_t, 25U> tm{};  // one short of the 26-byte report
+    EXPECT_EQ(migris_pus3_build_dynamic_hk_report(
+                  &ctx, &dp, &s, test_apid, &seq, 0U, 0U, tm.data(), tm.size()),
+              MIGRIS_PUS3_ERR_BUF_TOO_SMALL);
+    EXPECT_EQ(seq, 3U);
+}
+
+TEST(Pus3Dynamic, AdvancesSequenceAndMessageCounterOnSuccess) {
+    migris_pus3_ctx_t ctx{};
+    ctx.msg_counter[0] = 0x40U;
+    std::uint16_t seq = 0x0ABCU;
+    const migris_datapool_t dp = dynamic_datapool();
+    const migris_hk_structure_t s = dynamic_structure();
+    std::array<std::uint8_t, 64U> tm{};
+    ASSERT_GT(migris_pus3_build_dynamic_hk_report(
+                  &ctx, &dp, &s, test_apid, &seq, 0U, 0U, tm.data(), tm.size()),
+              0);
+    EXPECT_EQ(primary_of(tm.data()).seq_count, 0x0ABCU);  // pre-advance value on the wire
+    EXPECT_EQ(seq, 0x0ABDU);
+    EXPECT_EQ(ctx.msg_counter[0], 0x41U);
+}
+
+TEST(Pus3Dynamic, RejectsNullArguments) {
+    migris_pus3_ctx_t ctx{};
+    std::uint16_t seq = 0U;
+    const migris_datapool_t dp = dynamic_datapool();
+    const migris_hk_structure_t s = dynamic_structure();
+    std::array<std::uint8_t, 64U> tm{};
+    EXPECT_EQ(migris_pus3_build_dynamic_hk_report(
+                  nullptr, &dp, &s, test_apid, &seq, 0U, 0U, tm.data(), tm.size()),
+              MIGRIS_PUS3_ERR_BAD_ARG);
+    EXPECT_EQ(migris_pus3_build_dynamic_hk_report(
+                  &ctx, nullptr, &s, test_apid, &seq, 0U, 0U, tm.data(), tm.size()),
+              MIGRIS_PUS3_ERR_BAD_ARG);
+    EXPECT_EQ(migris_pus3_build_dynamic_hk_report(
+                  &ctx, &dp, nullptr, test_apid, &seq, 0U, 0U, tm.data(), tm.size()),
+              MIGRIS_PUS3_ERR_BAD_ARG);
+}
+
+TEST(Pus3, FrameworkDiagReportStaysFrozenAcrossFsw15) {
+    // fsw-15 adds dynamic structures but must not perturb the frozen
+    // FRAMEWORK_DIAG layout — migris_pus3_build_hk_report is unchanged.
+    // The eight tests above pin every field; this is the size sentinel.
+    migris_pus3_ctx_t ctx{};
+    std::uint16_t seq = 0U;
+    const migris_pus3_hk_params_t p = sentinel_params();
+    std::array<std::uint8_t, MIGRIS_PUS3_HK_TM_PACKET_SIZE> tm{};
+    const int rc = migris_pus3_build_hk_report(
+        &ctx, test_apid, &seq, 0U, MIGRIS_PUS3_SID_FRAMEWORK_DIAG, &p, 0U, tm.data(), tm.size());
+    EXPECT_EQ(rc, 47);
+    EXPECT_EQ(MIGRIS_PUS3_HK_SOURCE_DATA_SIZE, 29U);
+    EXPECT_EQ(secondary_of(tm.data()).service_subtype, MIGRIS_PUS3_SUBTYPE_HK_PARAM_REPORT);
 }
 
 }  // namespace

@@ -129,9 +129,17 @@ PUS_SERVICE_HOUSEKEEPING = 3
 PUS_3_SUBTYPE_HK_PARAM_REPORT = 25  # TM, the report
 PUS_3_SUBTYPE_ONE_SHOT_POLL = 27  # TC, "generate one shot"
 
+# Structure-management subtypes (TC), slice fsw-15.
+PUS_3_SUBTYPE_CREATE_STRUCTURE = 1
+PUS_3_SUBTYPE_DELETE_STRUCTURE = 2
+PUS_3_SUBTYPE_ENABLE_STRUCTURE = 5
+PUS_3_SUBTYPE_DISABLE_STRUCTURE = 6
+
 PUS3_SID_SIZE = 2
 # Reserved framework-structure block 0x0001..0x00FF (mission 0x0100+).
 PUS3_SID_FRAMEWORK_DIAG = 0x0001
+# Lowest Structure ID a ground-created (dynamic) structure may use.
+PUS3_SID_MISSION_MIN = 0x0100
 PUS3_HK_SOURCE_DATA_SIZE = 29  # SID(2) + 27-byte param block
 # primary 6 + TM sec 10 + source data 29 + CRC 2.
 PUS3_HK_TM_PACKET_SIZE = 47
@@ -165,6 +173,8 @@ DP_TYPE_WIDTH = {
 # Framework datapool parameter IDs the tc_uart sample registers
 # (reserved range 0x0001..0x00FF).
 DP_PARAM_HK_PERIOD_SEC = 0x0001
+DP_PARAM_FW_VERSION = 0x0002  # read-only u16
+DP_PARAM_FW_BUILD_ID = 0x0003  # read-only u32
 
 # PUS-11 on-board (time-based) scheduling (docs/wire/pus-11.md).
 PUS_SERVICE_SCHEDULING = 11
@@ -341,6 +351,114 @@ def build_pus3_oneshot_poll_tc(
         seq_count=seq_count,
         source_id=source_id,
         app_data=struct.pack(">H", sid),
+    )
+
+
+def build_pus3_create_structure_tc(
+    *,
+    sid: int,
+    param_ids: list[int],
+    interval_sec: int,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-3[1] create-housekeeping-structure TC.
+    Application data is SID(2) + parameter-count(1) + parameter ID(2
+    each) + reporting interval seconds(4), all big-endian."""
+    app = struct.pack(">HB", sid, len(param_ids))
+    for pid in param_ids:
+        app += struct.pack(">H", pid)
+    app += struct.pack(">I", interval_sec)
+    return build_tc(
+        service_type=PUS_SERVICE_HOUSEKEEPING,
+        service_subtype=PUS_3_SUBTYPE_CREATE_STRUCTURE,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+        app_data=app,
+    )
+
+
+def _build_pus3_sid_only_tc(
+    subtype: int,
+    *,
+    sid: int,
+    ack_flags: int,
+    apid: int,
+    seq_count: int,
+    source_id: int,
+) -> bytes:
+    """Encode a PUS-3 structure-management TC whose application data is
+    exactly one Structure ID — [3,2] delete, [3,5] enable, [3,6]
+    disable."""
+    return build_tc(
+        service_type=PUS_SERVICE_HOUSEKEEPING,
+        service_subtype=subtype,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+        app_data=struct.pack(">H", sid),
+    )
+
+
+def build_pus3_delete_structure_tc(
+    *,
+    sid: int,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-3[2] delete-housekeeping-structure TC."""
+    return _build_pus3_sid_only_tc(
+        PUS_3_SUBTYPE_DELETE_STRUCTURE,
+        sid=sid,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+    )
+
+
+def build_pus3_enable_structure_tc(
+    *,
+    sid: int,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-3[5] enable-housekeeping-structure TC."""
+    return _build_pus3_sid_only_tc(
+        PUS_3_SUBTYPE_ENABLE_STRUCTURE,
+        sid=sid,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
+    )
+
+
+def build_pus3_disable_structure_tc(
+    *,
+    sid: int,
+    ack_flags: int = 0,
+    apid: int = FSW_APID,
+    seq_count: int = 0,
+    source_id: int = 0,
+) -> bytes:
+    """Encode a complete PUS-3[6] disable-housekeeping-structure TC."""
+    return _build_pus3_sid_only_tc(
+        PUS_3_SUBTYPE_DISABLE_STRUCTURE,
+        sid=sid,
+        ack_flags=ack_flags,
+        apid=apid,
+        seq_count=seq_count,
+        source_id=source_id,
     )
 
 
@@ -678,6 +796,26 @@ def decode_pus20_report(tm: DecodedTm, type_map: dict[int, int]) -> dict[int, by
         out[pid] = data[pos : pos + width]
         pos += width
     return out
+
+
+def decode_pus3_dynamic_report(
+    tm: DecodedTm, type_codes: list[int]
+) -> tuple[int, list[bytes]]:
+    """Split a dynamic PUS-3[25] housekeeping report's source data into
+    its Structure ID and the list of raw parameter value byte-strings.
+    ``type_codes`` gives each sampled parameter's datapool type code, in
+    the order the structure names them, so the variable-width values can
+    be cut — the dynamic PUS-3 wire is not self-describing
+    (docs/wire/pus-3.md). The caller interprets the value bytes."""
+    data = tm.source_data
+    sid = int.from_bytes(data[:PUS3_SID_SIZE], "big")
+    values: list[bytes] = []
+    pos = PUS3_SID_SIZE
+    for code in type_codes:
+        width = DP_TYPE_WIDTH[code]
+        values.append(data[pos : pos + width])
+        pos += width
+    return sid, values
 
 
 def decode_pus11_summary_report(tm: DecodedTm) -> list[tuple[int, bytes]]:

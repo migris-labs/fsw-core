@@ -8,6 +8,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-15: PUS-3 housekeeping structure management.** Ground can
+  now define its own housekeeping structures, not just poll the one
+  hard-coded framework structure fsw-7 shipped. A *dynamic* structure
+  is a Structure ID, a list of on-board datapool parameters it samples,
+  a reporting interval and an enabled flag; the FSW emits a
+  datapool-backed PUS-3[25] report for it whose source data is the
+  Structure ID followed by each parameter's MIB-decoded value. This
+  closes the structure-management deferral fsw-7 recorded "until a
+  parameter datapool exists" — fsw-9 landed that datapool. A new
+  freestanding C subtree `lib/hkstore/` (with its own C-friendly
+  `.clang-tidy`) carries the bounded, RAM-only structure store, modelled
+  on `lib/schedule/`: `migris_hkstore_create` / `_delete` /
+  `_set_enabled` / `_find` / `_due`, the application supplying capacity
+  and per-structure parameter count as compile-time constants. The
+  PUS-3 codec gains four structure-management subtypes — [3,1] create,
+  [3,2] delete, [3,5] enable, [3,6] disable — behind a new
+  `migris_pus3_execute` entry point, and a `migris_pus3_build_dynamic_hk_report`
+  encoder; two new error codes `MIGRIS_PUS3_ERR_UNKNOWN_PARAM` and
+  `MIGRIS_PUS3_ERR_EXEC_FAILED`. The TC router gains a nullable
+  `migris_hkstore_t*` in its context and routes service 3 by subtype: a
+  [3,27] poll of SID `0x0001` still serves the frozen framework
+  structure, a [3,27] poll of any other SID serves a dynamic one, and
+  [3,1]/[3,2]/[3,5]/[3,6] reach `migris_pus3_execute`. The `tc_uart`
+  sample wires the structure store, registers two read-only
+  firmware-identity datapool parameters for a ground structure to
+  sample, and drains one due structure per main-loop iteration. New
+  `tests/hkstore_test.cpp`; `tests/pus3_test.cpp` and
+  `tests/tc_router_test.cpp` gain the structure-management and
+  dynamic-report suites; `tests/renode/test_tc_uart_hk.py` gains the
+  create → enable → observe → disable → delete closed loop. The new
+  subtypes and the dynamic report layout are added to
+  [`docs/wire/pus-3.md`](docs/wire/pus-3.md) — **purely additive and
+  non-breaking**: the frozen FRAMEWORK_DIAG report
+  (`migris_pus3_build_hk_report`) is byte-for-byte unchanged. Scoped
+  decisions:
+  - **`lib/hkstore/` does not depend on `lib/datapool/`.** The store
+    holds parameter IDs opaquely and never resolves them; a structure
+    naming a parameter the datapool does not define is caught at
+    *emission* time (the dynamic encoder fails the whole report,
+    `MIGRIS_PUS3_ERR_UNKNOWN_PARAM`), not at create time. Keeping the
+    two decoupled means a structure can be created independently of the
+    parameters it references. *Trigger*: a mission that needs
+    create-time parameter-ID validation gets it as an explicit option.
+  - **Dynamic Structure IDs must be `0x0100` or above.** The
+    `0x0001..0x00FF` block stays reserved for fsw-core framework
+    structures; FRAMEWORK_DIAG (`0x0001`) remains a frozen, hard-coded
+    layout in the PUS-3 codec, never an entry in the structure store —
+    so it can never be deleted or shadowed. `migris_hkstore_create`
+    rejects a framework-range SID.
+  - **A created structure starts disabled.** Flight-safe, like the
+    fsw-10 schedule: a freshly defined structure does not add to the
+    downlink until ground enables it with a [3,5]. An interval of 0
+    means poll-only (never emitted periodically).
+  - **Structure-management failures are `FC_EXEC_FAILURE`, not
+    `FC_UNKNOWN_SUBTYPE`.** The [3,27] poll keeps its fsw-7 contract
+    (an unknown SID is `FC_UNKNOWN_SUBTYPE` — the SID space is the
+    addressable unit there); a [3,1]/[3,2]/[3,5]/[3,6] is a *known*
+    subtype whose *execution* failed, so it follows the
+    PUS-11/15/20 routed-service model.
+  - **No Kconfig demo gate.** Structure management is TC-driven and a
+    created structure starts disabled, so the verification-stream build
+    emits no unsolicited structure telemetry — unlike the fsw-12/13/14
+    spontaneous boot demos, no `CONFIG_FSW_*_DEMO` is needed and
+    `test_tc_uart.py` is unaffected.
+  - **Deferred** (recorded here and in `docs/wire/pus-3.md`): the
+    diagnostic-structure subtypes [3,3]/[3,4] and the diagnostic report
+    [3,26] (a separate report stream — no driving use case yet);
+    structure-definition reporting [3,9]/[3,10] (ground reading a
+    structure's parameter list — no in-platform consumer until the
+    MCS); super-commutated parameter groups [3,7]/[3,8]; in-place
+    modification of a structure; non-volatile persistence of the
+    structure store across reset (RAM-only, like every other framework
+    store — *trigger*: the first non-volatile-storage slice).
 - **Slice fsw-14: FDIR isolation and recovery.** Completes the
   fault-management story fsw-8 began — FDIR now *acts* on a fault, not
   only reports it. Each anomaly accumulates a saturating occurrence

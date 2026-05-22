@@ -30,7 +30,10 @@ import pytest
 from _pus import (
     ACK_ACCEPTANCE,
     ACK_COMPLETION,
+    DP_PARAM_FW_BUILD_ID,
+    DP_PARAM_FW_VERSION,
     DP_PARAM_HK_PERIOD_SEC,
+    DP_TYPE_U16,
     DP_TYPE_U32,
     FSW_APID,
     PACKET_TYPE_TM,
@@ -61,6 +64,10 @@ from _pus import (
     PUS15_STORE_REPORT_SOURCE_SIZE,
     SEQ_FLAGS_UNSEGMENTED,
     DecodedTm,
+    build_pus3_create_structure_tc,
+    build_pus3_delete_structure_tc,
+    build_pus3_disable_structure_tc,
+    build_pus3_enable_structure_tc,
     build_pus3_oneshot_poll_tc,
     build_pus11_enable_tc,
     build_pus11_insert_tc,
@@ -72,6 +79,7 @@ from _pus import (
     build_pus17_are_you_alive_tc,
     build_pus20_report_request_tc,
     build_pus20_set_request_tc,
+    decode_pus3_dynamic_report,
     decode_pus11_summary_report,
     decode_pus13_part,
     decode_pus15_store_report,
@@ -676,3 +684,101 @@ def test_fdir_confirms_repeated_rejections_and_safes_the_spacecraft(  # noqa: F8
     _, transition = _collect(uart, find_safe_transition, timeout=60.0)
     assert transition.primary.seq_count > recovery.primary.seq_count
     assert transition.crc_ok
+
+
+# --- slice fsw-15: PUS-3 housekeeping structure management -------------
+
+# Mission Structure ID for the ground-created housekeeping structure.
+DYNAMIC_SID = 0x0100
+
+# Firmware-identity values the tc_uart sample sets on its two read-only
+# datapool parameters (samples/tc_uart/src/main.c). A ground-created
+# housekeeping structure samples them, so the dynamic [3,25] report
+# carries exactly these.
+FW_VERSION = 0x0001
+FW_BUILD_ID = 0x20260522
+
+
+def _completion_success(tms: list[DecodedTm], request_id: bytes):
+    """The PUS-1[7] completion-success report for ``request_id``, if
+    one is present in ``tms``."""
+    return next(
+        (
+            t
+            for t in tms
+            if t.secondary.service_type == PUS_SERVICE_VERIFICATION
+            and t.secondary.service_subtype == PUS_1_SUBTYPE_COMPLETION_SUCCESS
+            and t.request_id == request_id
+        ),
+        None,
+    )
+
+
+def test_dynamic_housekeeping_structure_lifecycle(tc_hk_running) -> None:  # noqa: F811
+    """The slice fsw-15 headline: ground creates a housekeeping
+    structure over two read-only datapool parameters, enables it, the
+    FSW spontaneously emits a datapool-backed dynamic PUS-3[25] report
+    for it, and ground then disables and deletes it — the full
+    structure-management round trip on the live downlink."""
+    _, uart = tc_hk_running
+
+    # Create a structure sampling the sample's two firmware-identity
+    # parameters, reported every HK_PERIOD_SEC seconds. Distinct
+    # sequence counts keep each management TC's request id unique.
+    create = build_pus3_create_structure_tc(
+        sid=DYNAMIC_SID,
+        param_ids=[DP_PARAM_FW_VERSION, DP_PARAM_FW_BUILD_ID],
+        interval_sec=HK_PERIOD_SEC,
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0510,
+        seq_count=0x0020,
+    )
+    uart.send(create)
+    _collect(uart, lambda ts: _completion_success(ts, create[:4]), timeout=60.0)
+
+    # Enable it — a create leaves the structure disabled (flight-safe).
+    enable = build_pus3_enable_structure_tc(
+        sid=DYNAMIC_SID,
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0511,
+        seq_count=0x0021,
+    )
+    uart.send(enable)
+    _collect(uart, lambda ts: _completion_success(ts, enable[:4]), timeout=60.0)
+
+    # The enabled structure is now emitted spontaneously as a dynamic
+    # [3,25] — Structure ID 0x0100, destination 0, distinct from the
+    # FRAMEWORK_DIAG (SID 0x0001) report.
+    def find_dynamic(tms: list[DecodedTm]):
+        return next((t for t in tms if _is_hk(t) and t.pus3_sid == DYNAMIC_SID), None)
+
+    _, dyn = _collect(uart, find_dynamic, timeout=60.0)
+    assert dyn.secondary.destination_id == 0  # spontaneous, no triggering TC
+    sid, values = decode_pus3_dynamic_report(dyn, [DP_TYPE_U16, DP_TYPE_U32])
+    assert sid == DYNAMIC_SID
+    assert len(dyn.source_data) == 8  # SID(2) + u16(2) + u32(4)
+    assert int.from_bytes(values[0], "big") == FW_VERSION
+    assert int.from_bytes(values[1], "big") == FW_BUILD_ID
+    assert dyn.crc_ok
+
+    # Disable, then delete — both complete successfully.
+    disable = build_pus3_disable_structure_tc(
+        sid=DYNAMIC_SID,
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0512,
+        seq_count=0x0022,
+    )
+    uart.send(disable)
+    _collect(uart, lambda ts: _completion_success(ts, disable[:4]), timeout=60.0)
+
+    delete = build_pus3_delete_structure_tc(
+        sid=DYNAMIC_SID,
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0513,
+        seq_count=0x0023,
+    )
+    uart.send(delete)
+    _, completion = _collect(
+        uart, lambda ts: _completion_success(ts, delete[:4]), timeout=60.0
+    )
+    assert completion.failure_code is None  # completion success
