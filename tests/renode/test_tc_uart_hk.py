@@ -832,7 +832,10 @@ def test_datapool_value_survives_a_warm_reset(tc_hk_running) -> None:  # noqa: F
     # 3. Warm-reset the emulated MCU. Renode's `machine Reset` resets
     #    the CPU and peripherals but DOES NOT touch the flash banks —
     #    the storage_partition keeps the A/B image across the reset.
+    #    `Reset` leaves the machine paused, so `start` is needed to
+    #    resume emulation from the reset vector.
     mon.cmd("machine Reset")
+    mon.cmd("start")
 
     # 4. Ask the FSW to report the HK-period parameter on the
     #    post-reset boot. Used a different source_id so the report is
