@@ -64,6 +64,18 @@
  * RAM-backed and volatile (empty after a reboot). Wire format is
  * pinned in docs/wire/pus-15.md.
  *
+ * Slice fsw-12 adds a PUS-13 large-data downlink. When
+ * CONFIG_FSW_LARGEDATA_DEMO is set, the sample starts one transfer of
+ * a synthetic data unit at boot and, each main-loop iteration, emits
+ * one [13,1] / [13,2] / [13,3] part — a unit too large for a single
+ * Space Packet, dripped out one packet per iteration and reassembled
+ * from the part header on the ground. PUS-13 has no inbound subtype,
+ * so the demo is the observable surface for the closed-loop test; it
+ * is left off in the verification-stream build, whose tests read a
+ * fixed byte count per stimulus. Parts are live TM, tapped into the
+ * packet store like any other emitted telemetry. Wire format is
+ * pinned in docs/wire/pus-13.md.
+ *
  * Single producer (the RX IRQ) and single consumer (main thread)
  * make ring_buf safe without explicit locking. We send TM with
  * blocking ``uart_poll_out`` — this slice has no concurrent TX
@@ -81,6 +93,7 @@
 
 #include "migris/fsw/datapool/datapool.h"
 #include "migris/fsw/fdir/fdir.h"
+#include "migris/fsw/largedata/largedata.h"
 #include "migris/fsw/pktstore/pktstore.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus11.h"
@@ -151,6 +164,20 @@ static migris_schedule_t schedule;
  * MIGRIS_PKTSTORE_CAPACITY packets — far too large for the main()
  * stack. RAM-only and volatile: empty after every reboot. */
 static migris_pktstore_t store;
+
+#ifdef CONFIG_FSW_LARGEDATA_DEMO
+/* On-board large-data downlink session (slice fsw-12). PUS-13 has no
+ * inbound telecommand, so — unlike PUS-11 or PUS-15 — a closed-loop
+ * test cannot trigger a transfer; the sample instead starts one at
+ * boot over a synthetic data unit, dripped out one part per main-loop
+ * iteration. The unit is a byte ramp so the ground side can verify
+ * the reassembled bytes. File-scope: the session borrows the unit, so
+ * both must outlive the main loop. */
+#    define LARGEDATA_DEMO_UNIT_LEN 200U
+#    define LARGEDATA_DEMO_TRANSACTION_ID 0x0001U
+static migris_largedata_session_t largedata;
+static uint8_t largedata_demo_unit[LARGEDATA_DEMO_UNIT_LEN];
+#endif
 
 static void uart_isr(const struct device* dev, void* user_data) {
     ARG_UNUSED(user_data);
@@ -276,6 +303,18 @@ int main(void) {
      * leaves storage ENABLED, so telemetry is captured from boot. */
     migris_pktstore_init(&store);
     ctx.store = &store;
+
+#ifdef CONFIG_FSW_LARGEDATA_DEMO
+    /* Slice fsw-12: arm the PUS-13 large-data demo. The unit is a byte
+     * ramp; the main loop's part-drain tick below downlinks it as a
+     * sequence of [13,1] / [13,2] / [13,3] parts, one per iteration. */
+    for (size_t i = 0U; i < LARGEDATA_DEMO_UNIT_LEN; ++i) {
+        largedata_demo_unit[i] = (uint8_t)i;
+    }
+    migris_largedata_init(&largedata);
+    (void)migris_largedata_start(
+        &largedata, LARGEDATA_DEMO_TRANSACTION_ID, largedata_demo_unit, LARGEDATA_DEMO_UNIT_LEN);
+#endif
 
     uint8_t tc[TC_BUF_SIZE];
     uint8_t out[MIGRIS_TC_ROUTER_MAX_TM];
@@ -418,6 +457,21 @@ int main(void) {
         if (migris_pktstore_retrieve_next(&store, out, sizeof(out), &replay_len) == 1) {
             uart_tx_blocking(uart_dev, out, replay_len);
         }
+
+#ifdef CONFIG_FSW_LARGEDATA_DEMO
+        /* Large-data part drain (slice fsw-12): emit one [13,1] /
+         * [13,2] / [13,3] part of the PUS-13 demo transfer per
+         * iteration, after the retrieval drain and before the
+         * inbound-TC handling so each use of `out[]` is fully
+         * transmitted first. Parts are live TM — they go out through
+         * transmit_tm and are tapped into the packet store like any
+         * other emitted telemetry. */
+        const int part_n = migris_largedata_next_part(
+            &largedata, ctx.apid, &ctx.tm_seq_count, now_sec, 0U, out, sizeof(out));
+        if (part_n > 0) {
+            transmit_tm(uart_dev, now_sec, out, (size_t)part_n);
+        }
+#endif
 
         uint8_t b = 0U;
         const uint32_t got = ring_buf_get(&rx_ring, &b, 1);

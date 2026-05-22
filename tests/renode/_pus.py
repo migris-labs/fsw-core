@@ -192,6 +192,16 @@ PUS15_STORE_REPORT_SOURCE_SIZE = 11
 # primary 6 + TM sec 10 + source data 11 + CRC 2.
 PUS15_STORE_REPORT_PACKET_SIZE = 29
 
+# PUS-13 large data transfer, downlink (docs/wire/pus-13.md).
+PUS_SERVICE_LARGE_DATA = 13
+PUS_13_SUBTYPE_FIRST_PART = 1  # TM, first downlink part
+PUS_13_SUBTYPE_INTERMEDIATE_PART = 2  # TM, intermediate downlink part
+PUS_13_SUBTYPE_LAST_PART = 3  # TM, last downlink part
+
+# A PUS-13 part's source data is a 6-byte part header — transaction id
+# (2) + part number (2) + total parts (2), big-endian — then the payload.
+PUS13_PART_HEADER_SIZE = 6
+
 
 @dataclass
 class PusTcSecondary:
@@ -710,3 +720,44 @@ def decode_pus15_store_report(tm: DecodedTm) -> Pus15StoreReport:
         oldest_time=oldest,
         newest_time=newest,
     )
+
+
+@dataclass
+class Pus13Part:
+    """A decoded PUS-13 downlink part (docs/wire/pus-13.md)."""
+
+    transaction_id: int
+    part_number: int
+    total_parts: int
+    payload: bytes
+
+
+def decode_pus13_part(tm: DecodedTm) -> Pus13Part:
+    """Parse a PUS-13 [13,1] / [13,2] / [13,3] part: a 6-byte part
+    header — transaction id, 0-based part number, total parts, all
+    big-endian — followed by the part payload."""
+    data = tm.source_data
+    if len(data) < PUS13_PART_HEADER_SIZE:
+        raise ValueError(
+            f"PUS-13 part needs at least {PUS13_PART_HEADER_SIZE} source bytes, "
+            f"got {len(data)}"
+        )
+    transaction_id, part_number, total_parts = struct.unpack(
+        ">HHH", data[:PUS13_PART_HEADER_SIZE]
+    )
+    return Pus13Part(
+        transaction_id=transaction_id,
+        part_number=part_number,
+        total_parts=total_parts,
+        payload=data[PUS13_PART_HEADER_SIZE:],
+    )
+
+
+def reassemble_pus13(parts: list[DecodedTm]) -> bytes:
+    """Reassemble a large data unit from its PUS-13 part packets: the
+    concatenation of the part payloads in ascending part-number order.
+    The caller has filtered ``parts`` to a single transaction."""
+    decoded = sorted(
+        (decode_pus13_part(p) for p in parts), key=lambda d: d.part_number
+    )
+    return b"".join(d.payload for d in decoded)

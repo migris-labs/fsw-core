@@ -15,6 +15,7 @@
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
 #include "migris/fsw/pus/pus11.h"
+#include "migris/fsw/pus/pus13.h"
 #include "migris/fsw/pus/pus15.h"
 #include "migris/fsw/pus/pus17.h"
 #include "migris/fsw/pus/pus20.h"
@@ -327,6 +328,25 @@ TEST(TcRouter, UnknownServiceFailsAcceptance) {
     // is now a valid service — see the PUS-3 tests below.
     const auto tc = build_tc({.service_type = 99U,
                               .service_subtype = 1U,
+                              .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE,
+                              .source_id = 0x42U});
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 1U);
+    EXPECT_EQ(key(tms[0]), pus1_accept_fail_key);
+    EXPECT_EQ(tms[0].failure_code, static_cast<int>(MIGRIS_PUS1_FC_UNKNOWN_SERVICE));
+}
+
+TEST(TcRouter, LargeDataServiceIsNotRoutable) {
+    auto ctx = make_ctx();
+    // PUS-13 (large data transfer) is telemetry-only in fsw-12: it has
+    // no inbound subtype, so a service-13 TC is rejected at acceptance
+    // exactly like any other unrouted service. Pins the deliberate
+    // "TM-only, no router handler" decision (docs/wire/pus-13.md).
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_LARGE_DATA,
+                              .service_subtype = MIGRIS_PUS13_SUBTYPE_FIRST_PART,
                               .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE,
                               .source_id = 0x42U});
     std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
