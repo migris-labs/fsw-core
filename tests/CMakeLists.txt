@@ -19,7 +19,8 @@ add_executable(
   datapool_test.cpp
   schedule_test.cpp
   pktstore_test.cpp
-  largedata_test.cpp)
+  largedata_test.cpp
+  mode_test.cpp)
 
 target_link_libraries(fsw-core-tests PRIVATE migris::fsw-core GTest::gtest GTest::gtest_main)
 

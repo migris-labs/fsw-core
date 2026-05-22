@@ -78,7 +78,8 @@ target_sources(
           lib/datapool/src/datapool.c
           lib/schedule/src/schedule.c
           lib/pktstore/src/pktstore.c
-          lib/largedata/src/largedata.c)
+          lib/largedata/src/largedata.c
+          lib/mode/src/mode.c)
 
 target_include_directories(
   fsw-core
@@ -89,6 +90,7 @@ target_include_directories(
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/schedule/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/pktstore/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/largedata/include>
+         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/mode/include>
          $<INSTALL_INTERFACE:include>)
 
 target_compile_features(fsw-core PUBLIC cxx_std_20 c_std_99)
@@ -173,6 +175,12 @@ install(
 
 install(
   DIRECTORY lib/largedata/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING
+  PATTERN "*.h")
+
+install(
+  DIRECTORY lib/mode/include/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING
   PATTERN "*.h")

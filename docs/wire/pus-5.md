@@ -61,9 +61,11 @@ mission-side numbering is deferred to its first consumer.
 | `0x0001` | `FSW_BOOT`    | info [1]   | Flight software (re)started. No auxiliary data.                                          |
 | `0x0002` | `TC_REJECTED` | low [2]    | A telecommand addressed to this AP failed acceptance. Aux = 3 bytes: PUS-1 failure code, TC service type, TC service subtype (service type/subtype are `00` on a length error, where the secondary header was not parseable). |
 | `0x0003` | `RX_OVERFLOW` | medium [3] | UART RX-ring overflow — inbound command bytes were dropped before forming a packet. Aux = 4 bytes: count of bytes dropped since the previous `RX_OVERFLOW` report, big-endian u32. |
+| `0x0004` | `MODE_CHANGED` | info [1]  | On-board operating mode changed. Aux = 2 bytes: the previous mode ID then the new mode ID (u8 each). Emitted by the mode manager (`lib/mode/`) on a successful transition. |
 
-`0x0002` and `0x0003` are added by slice fsw-8. Adding an event ID
-within the reserved `0x0001`–`0x00FF` block is **non-breaking** (see
+`0x0002` and `0x0003` are added by slice fsw-8, `0x0004` by slice
+fsw-13. Adding an event ID within the reserved `0x0001`–`0x00FF` block
+is **non-breaking** (see
 *Versioning* below). The severity column is the **single source of
 truth** for how each anomaly classifies on the wire (it selects the
 report subtype, `subtype = severity + 1`); it is owned by the FDIR

@@ -55,6 +55,7 @@ from _pus import (
     PUS_VERSION_C,
     PUS3_HK_SOURCE_DATA_SIZE,
     PUS3_SID_FRAMEWORK_DIAG,
+    PUS5_EVT_MODE_CHANGED,
     PUS15_STORE_REPORT_SOURCE_SIZE,
     SEQ_FLAGS_UNSEGMENTED,
     DecodedTm,
@@ -567,3 +568,39 @@ def test_pus13_large_data_downlink_reassembles(tc_hk_running) -> None:  # noqa: 
     assert reassemble_pus13(parts) == bytes(
         i & 0xFF for i in range(LARGEDATA_DEMO_UNIT_LEN)
     )
+
+
+# Operating-mode IDs the tc_uart sample's mode-manager demo defines
+# (CONFIG_FSW_MODE_DEMO, on for this build). Kept here so the expected
+# boot-time transition is legible next to the assertion.
+FSW_MODE_BOOT = 0
+FSW_MODE_NOMINAL = 1
+
+
+def test_mode_manager_emits_a_mode_changed_event(tc_hk_running) -> None:  # noqa: F811
+    """The slice fsw-13 headline: the operating-mode manager performs a
+    boot-time BOOT -> NOMINAL transition and announces it as a
+    spontaneous PUS-5 MODE_CHANGED informative event, carrying the
+    previous and new mode IDs as its 2-byte auxiliary data."""
+    _, uart = tc_hk_running
+
+    def find_mode_changed(tms: list[DecodedTm]):
+        return next(
+            (
+                t
+                for t in tms
+                if t.secondary.service_type == PUS_SERVICE_EVENT_REPORTING
+                and t.event_id == PUS5_EVT_MODE_CHANGED
+            ),
+            None,
+        )
+
+    tms, event = _collect(uart, find_mode_changed, timeout=60.0)
+    _assert_boot_first(tms)
+
+    assert event.primary.type == PACKET_TYPE_TM
+    assert event.primary.apid == FSW_APID
+    assert event.secondary.service_subtype == PUS_5_SUBTYPE_INFO
+    assert event.secondary.destination_id == 0  # spontaneous, no triggering TC
+    assert event.event_aux == bytes([FSW_MODE_BOOT, FSW_MODE_NOMINAL])
+    assert event.crc_ok
