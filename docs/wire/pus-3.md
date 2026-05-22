@@ -2,7 +2,7 @@
 
 Authoritative byte-level specification for **PUS-3 — Housekeeping &
 diagnostic data reporting** in the Migris flight-software framework.
-Pinned by slice fsw-7. This document **inherits** the CCSDS primary
+Pinned by slice fsw-7; extended by slice fsw-15. This document **inherits** the CCSDS primary
 header, UART framing, CRC, PUS-C TC secondary header and PUS-C TM
 secondary header pinned in [`pus-17.md`](pus-17.md) — only the
 PUS-3-specific surface (subtypes, structure ID, source data, emission
@@ -17,31 +17,39 @@ Standards reference:
   data reporting). Migris implements a pragmatic subset (workspace
   `CLAUDE.md`); this document specifies exactly the surface needed.
 
-## Scope of this slice
+## Scope
 
-PUS-3 has a large structure-management surface. Slice fsw-7 ships the
+PUS-3 has a large structure-management surface. Slice fsw-7 shipped the
 **spontaneous + polled report path** against a single predefined
-framework structure; everything that presupposes a *parameter datapool*
-(a typed, addressable on-board parameter pool a ground-defined
-structure can select from) is deliberately deferred until that datapool
-exists — defining it against a non-existent pool would be a wire
-contract we cannot honour.
+framework structure; slice fsw-15 adds **ground-defined (dynamic)
+housekeeping structures** and the structure-management subtypes that
+create, delete, enable and disable them.
 
-| Subtype | Direction | Meaning                                         | In fsw-7 |
+| Subtype | Direction | Meaning                                         | Status   |
 |---------|-----------|-------------------------------------------------|----------|
-| 25      | TM        | Housekeeping parameter report                   | ✅       |
-| 27      | TC        | Generate a one-shot housekeeping report         | ✅       |
-| 1 / 2   | TC        | Create / delete a housekeeping structure        | deferred |
+| 25      | TM        | Housekeeping parameter report                   | fsw-7    |
+| 27      | TC        | Generate a one-shot housekeeping report         | fsw-7    |
+| 1 / 2   | TC        | Create / delete a housekeeping structure        | fsw-15   |
+| 5 / 6   | TC        | Enable / disable a structure's periodic report  | fsw-15   |
 | 3 / 4   | TC        | Create / delete a diagnostic structure          | deferred |
-| 5 / 6   | TC        | Enable / disable periodic HK generation         | deferred |
-| 9 / 11  | TC        | Report HK / diagnostic structure definitions    | deferred |
+| 9 / 10  | TC / TM   | Report a housekeeping structure's definition    | deferred |
+| 7 / 8   | TC        | Append to / clear a super-commutated group      | deferred |
 | 26      | TM        | Diagnostic parameter report                     | deferred |
 
-Deferred subtypes 1–6/9/11 need the datapool (structure definitions
-select datapool parameters; enable/disable needs per-structure runtime
-state). The function-pointer service-dispatch table is likewise
-deferred: a `switch` over two services in `tc_router.c` is correct and
-minimal; the table is earned at a third independent service.
+A **dynamic** structure selects a list of parameters from the on-board
+parameter datapool ([`pus-20.md`](pus-20.md)); its [25] report
+serialises those parameters' values in order. The predefined framework
+structure FRAMEWORK_DIAG (SID `0x0001`) keeps its frozen layout
+unchanged — fsw-15 is **purely additive and non-breaking**.
+
+Still deferred: the diagnostic-structure subtypes [3]/[4] and the
+diagnostic report [26] (a separate report stream — no driving use case
+yet); structure-definition reporting [9]/[10] (ground reading back a
+structure's parameter list — no in-platform consumer until the MCS);
+super-commutated parameter groups [7]/[8]; in-place modification of an
+existing structure; create-time validation of parameter IDs against the
+datapool (a structure naming an absent parameter is caught at emission
+time instead — see below).
 
 ## Pinned platform decisions (additional to pus-17.md)
 
@@ -175,6 +183,114 @@ defined structure, is an **execution-stage** failure: the TC is
 with `UNKNOWN_SUBTYPE` (PUS-1[8]) — no PUS-3[25] is emitted. This
 matches the existing PUS-17 unknown-subtype model exactly.
 
+A [3,27] poll resolves its SID two ways: `0x0001` selects the frozen
+framework structure (the report above); any other SID is looked up in
+the dynamic housekeeping-structure store (slice fsw-15). A SID found
+there is reported with the dynamic [25] layout below; a SID found in
+neither is the unknown-structure case above (`UNKNOWN_SUBTYPE`).
+
+## PUS-3[25] — dynamic-structure housekeeping parameter report
+
+A [25] report for a ground-created (dynamic) structure has the same
+packet shape as the framework report but a **variable-length,
+structure-defined** source data.
+
+```
+offset  bytes        meaning
+------  -----------  ----------------------------------------
+0..5    09 00 Cx xx LL LL   primary hdr (TM, APID 0x100, len from data field)
+6       20           PUS-C ver (2) + spacecraft time ref status (0)
+7       03           Service Type = 3
+8       19           Subtype = 25 (housekeeping parameter report)
+9       MM           Message Counter (shared with the framework [25])
+10..11  DD DD        Destination ID — 0 spontaneous, else poll source ID
+12..15  TT TT TT TT  CUC coarse seconds, big-endian
+                     --- source data (variable) ---
+16..17  SS SS        Structure ID (the dynamic SID, >= 0x0100), big-endian
+18..    VV ...       each parameter's value, in the order the structure
+                     names them — MIB-decoded, big-endian, at the on-wire
+                     width its datapool type dictates (1, 2 or 4 bytes)
+N..N+1  ?? ??        CRC-16-CCITT-FALSE over every preceding byte
+```
+
+The parameter values are **not self-describing** — there is no type or
+ID tag on the wire. Ground decodes them from the structure definition
+(the parameter ID list supplied at [3,1] create) and the MIB
+(ID → type), exactly as for any PUS-3 housekeeping structure. A
+structure of *N* four-byte parameters is a `6 + 10 + (2 + 4·N) + 2`
+byte packet; the framework caps *N* at `MIGRIS_HKSTORE_MAX_PARAMS`.
+
+If the structure names a parameter the datapool does not define, the
+**whole report fails** — no partial packet is emitted, and the packet
+length stays deterministic. On the [3,27]-polled path this is a
+completion-stage `FC_EXEC_FAILURE`.
+
+The `[25]` message counter is **shared** between the framework and
+dynamic reports — they are the same (service, subtype). The framework
+FRAMEWORK_DIAG report (SID `0x0001`) is unaffected by this section: its
+27-byte fixed parameter block stays exactly as specified above.
+
+## TC[3,1] — create a housekeeping structure
+
+Total packet size: **17 + 2·N bytes** for an *N*-parameter structure —
+primary 6 + TC sec 5 + application data `7 + 2·N` + CRC 2.
+
+```
+offset  bytes        meaning
+------  -----------  ----------------------------------------
+0..5    1C 00 Cx xx LL LL   primary hdr (TC, APID 0x100)
+6       2A           PUS-C ver (2) + ack flags
+7       03           Service Type = 3
+8       01           Subtype = 1 (create a housekeeping structure)
+9..10   II II        Source ID, big-endian
+                     --- application data (7 + 2·N bytes) ---
+11..12  SS SS        Structure ID (>= 0x0100), big-endian
+13      NN           parameter count N (1 .. MIGRIS_HKSTORE_MAX_PARAMS)
+14..    PP PP ...    N parameter IDs, 2 bytes each, big-endian
+14+2N.. JJ JJ JJ JJ  reporting interval, seconds (u32, BE); 0 = poll-only
+...     ?? ??        CRC-16-CCITT-FALSE
+```
+
+The structure is created **disabled** — ground enables it with a [3,5].
+It does not emit a periodic report until it is *both* enabled and its
+interval has elapsed; an interval of `0` means it is never reported
+periodically (it can still be polled with a [3,27]).
+
+The Structure ID **must be `0x0100` or above** — the `0x0001..0x00FF`
+block is reserved for fsw-core framework structures and a create naming
+one is rejected. A create is likewise rejected for a SID that already
+defines a structure, a parameter count of 0 or above
+`MIGRIS_HKSTORE_MAX_PARAMS`, or a full structure store.
+
+Parameter IDs are **not** validated against the datapool at create
+time — a structure may name a parameter not (yet) defined. That is
+caught when a [25] report is built (see the dynamic report above).
+
+## TC[3,2] / [3,5] / [3,6] — delete / enable / disable a structure
+
+Application data is exactly one Structure ID (2 bytes, big-endian) —
+the structure to delete ([3,2]), enable ([3,5]) or disable ([3,6]).
+Total packet size: **15 bytes** (primary 6 + TC sec 5 + SID 2 + CRC 2),
+identical in shape to a [3,27] poll. A SID that names no structure is
+an execution failure.
+
+## Structure-management failure model
+
+The four structure-management subtypes ([3,1]/[3,2]/[3,5]/[3,6])
+produce **no telemetry of their own** — only the PUS-1 verification the
+telecommand requested. A telecommand that is *accepted* but whose
+*execution* fails — malformed application data, an unknown / duplicate /
+framework-range SID, a parameter list too long, a full store, or no
+structure store wired on this application process — yields a PUS-1[8]
+completion failure with `FC_EXEC_FAILURE`.
+
+This differs deliberately from the [3,27] poll, whose unknown-SID and
+bad-length failures map to `FC_UNKNOWN_SUBTYPE` (the fsw-7 contract:
+on the poll path the Structure ID space is the addressable unit). A
+structure-management subtype is a *known, valid* subtype whose
+*execution* failed — hence `FC_EXEC_FAILURE`, consistent with the
+PUS-11 / PUS-15 / PUS-20 routed-service model.
+
 ## Versioning of this document
 
 This file specifies wire-visible structure. Any change to a byte
@@ -207,3 +323,14 @@ producer"), not an accidental drift. The project is pre-1.0 (SemVer
 that special-cased "a polled housekeeping report ⇒ bytes 28..31 are
 zero" must be updated to read them as live counters (identical to the
 spontaneous report).
+
+### Non-breaking additions in slice fsw-15 — structure management
+
+Slice fsw-15 adds the structure-management subtypes [3,1]/[3,2]/[3,5]/
+[3,6], the dynamic [25] report, and the dynamic-SID resolution on the
+[3,27] poll. Every addition is **non-breaking** by the rule above: the
+frozen FRAMEWORK_DIAG [25] report (SID `0x0001`) — its 47-byte packet
+and 27-byte parameter block — is byte-for-byte unchanged, the [3,27]
+poll of SID `0x0001` is unchanged, and the new subtypes occupy
+previously unused subtype numbers. Recorded in `CHANGELOG.md` under
+*Added*, not *Changed (breaking)*.

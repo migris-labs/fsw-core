@@ -109,43 +109,18 @@ void migris_tc_accept(const uint8_t* tc,
     out->fc = MIGRIS_PUS1_FC_NONE; /* accepted */
 }
 
-/* Execute a routed PUS-3 TC. The only inbound subtype is [27]
- * "generate a one-shot housekeeping report", whose application data is
- * exactly one Structure ID. Writes the [25] report into `out` and
- * returns its byte count, or 0 with `*exec_fc` set to the PUS-1
- * completion-failure cause (bad subtype, malformed app data, or
- * unknown SID — all surface to ground as UNKNOWN_SUBTYPE since the
- * structure ID space is the addressable unit here).
- *
- * As of slice fsw-8 the router owns the PUS-5 context, so this polled
- * report carries the *live* PUS-5 message counters — identical to the
- * spontaneous periodic report. The fsw-7 zero-on-the-polled-path
- * asymmetry is resolved (see docs/wire/pus-3.md). */
-static int router_pus3_oneshot(migris_tc_router_ctx_t* ctx,
-                               const migris_tc_accept_result_t* v,
-                               uint32_t now_seconds,
-                               const uint8_t* tc,
-                               size_t tc_len,
-                               uint8_t* out,
-                               size_t out_cap,
-                               migris_pus1_failure_code_t* exec_fc) {
-    if (v->service_subtype != MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL) {
-        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
-        return 0;
-    }
-
-    /* accept() verified tc_len equals the declared total and is at
-     * least MIGRIS_TC_ROUTER_MIN_TC (primary + TC sec + CRC), so
-     * app_off + 2 <= tc_len and this subtraction cannot underflow. */
-    const size_t app_off = MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE;
-    const size_t app_len = tc_len - app_off - 2U;
-    if (app_len != MIGRIS_PUS3_POLL_TC_APP_DATA_SIZE) {
-        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
-        return 0;
-    }
-    const migris_pus3_sid_t sid =
-        (migris_pus3_sid_t)(((uint16_t)tc[app_off] << 8) | (uint16_t)tc[app_off + 1U]);
-
+/* Serve a [3,27] poll of the frozen framework structure FRAMEWORK_DIAG.
+ * Snapshots the router-owned PUS-1 / PUS-5 / PUS-17 counters into the
+ * parameter block and emits the frozen [25] report. As of slice fsw-8
+ * the router owns the PUS-5 context, so this polled report carries the
+ * *live* PUS-5 counters — identical to the spontaneous periodic report
+ * (the fsw-7 zero-on-the-polled-path asymmetry is resolved). */
+static int router_pus3_poll_framework(migris_tc_router_ctx_t* ctx,
+                                      const migris_tc_accept_result_t* v,
+                                      uint32_t now_seconds,
+                                      uint8_t* out,
+                                      size_t out_cap,
+                                      migris_pus1_failure_code_t* exec_fc) {
     migris_pus3_hk_params_t p;
     for (size_t i = 0U; i < 4U; ++i) {
         p.pus1_msg_counter[i] = ctx->pus1.msg_counter[i];
@@ -160,7 +135,7 @@ static int router_pus3_oneshot(migris_tc_router_ctx_t* ctx,
                                                ctx->apid,
                                                &ctx->tm_seq_count,
                                                now_seconds,
-                                               sid,
+                                               MIGRIS_PUS3_SID_FRAMEWORK_DIAG,
                                                &p,
                                                v->source_id,
                                                out,
@@ -168,11 +143,122 @@ static int router_pus3_oneshot(migris_tc_router_ctx_t* ctx,
     if (rc > 0) {
         return rc;
     }
-    if (rc == MIGRIS_PUS3_ERR_UNKNOWN_SID) {
+    *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+    return 0;
+}
+
+/* Serve a [3,27] poll of a dynamic (ground-created) structure. The
+ * structure must exist in the housekeeping-structure store; the report
+ * serialises its datapool parameters' values. A SID with no structure
+ * is reported UNKNOWN_SUBTYPE — the structure ID space is the
+ * addressable unit, exactly as the fsw-7 [3,27] contract pinned. */
+static int router_pus3_poll_dynamic(migris_tc_router_ctx_t* ctx,
+                                    const migris_tc_accept_result_t* v,
+                                    uint32_t now_seconds,
+                                    migris_pus3_sid_t sid,
+                                    uint8_t* out,
+                                    size_t out_cap,
+                                    migris_pus1_failure_code_t* exec_fc) {
+    if (ctx->hkstore == NULL) {
+        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE; /* no store ⇒ no such structure */
+        return 0;
+    }
+    const migris_hk_structure_t* s = migris_hkstore_find(ctx->hkstore, sid);
+    if (s == NULL) {
         *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
-    } else {
+        return 0;
+    }
+    if (ctx->datapool == NULL) {
+        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE; /* structure exists but cannot be resolved */
+        return 0;
+    }
+    const int rc = migris_pus3_build_dynamic_hk_report(&ctx->pus3,
+                                                       ctx->datapool,
+                                                       s,
+                                                       ctx->apid,
+                                                       &ctx->tm_seq_count,
+                                                       now_seconds,
+                                                       v->source_id,
+                                                       out,
+                                                       out_cap);
+    if (rc > 0) {
+        return rc;
+    }
+    *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+    return 0;
+}
+
+/* Serve a [3,27] "generate a one-shot housekeeping report" poll. The
+ * application data is exactly one Structure ID; SID 0x0001 selects the
+ * frozen framework structure, any other SID a dynamic one. */
+static int router_pus3_poll(migris_tc_router_ctx_t* ctx,
+                            const migris_tc_accept_result_t* v,
+                            uint32_t now_seconds,
+                            const uint8_t* app,
+                            size_t app_len,
+                            uint8_t* out,
+                            size_t out_cap,
+                            migris_pus1_failure_code_t* exec_fc) {
+    if (app_len != MIGRIS_PUS3_POLL_TC_APP_DATA_SIZE) {
+        *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
+        return 0;
+    }
+    const migris_pus3_sid_t sid = (migris_pus3_sid_t)(((uint16_t)app[0] << 8) | (uint16_t)app[1]);
+    if (sid == MIGRIS_PUS3_SID_FRAMEWORK_DIAG) {
+        return router_pus3_poll_framework(ctx, v, now_seconds, out, out_cap, exec_fc);
+    }
+    return router_pus3_poll_dynamic(ctx, v, now_seconds, sid, out, out_cap, exec_fc);
+}
+
+/* Execute a routed PUS-3 structure-management TC ([3,1]/[3,2]/[3,5]/
+ * [3,6]). These telecommands mutate the housekeeping-structure store
+ * and emit no telemetry of their own — only PUS-1 verification — so
+ * this always returns 0 and sets `*exec_fc` on failure. A store not
+ * wired on this AP, or any rejected operation, is a completion-stage
+ * FC_EXEC_FAILURE (the subtype itself is known and valid). */
+static int router_pus3_manage(migris_tc_router_ctx_t* ctx,
+                              const migris_tc_accept_result_t* v,
+                              const uint8_t* app,
+                              size_t app_len,
+                              migris_pus1_failure_code_t* exec_fc) {
+    if (ctx->hkstore == NULL) {
+        *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
+        return 0;
+    }
+    if (migris_pus3_execute(ctx->hkstore, v->service_subtype, app, app_len) != MIGRIS_PUS3_OK) {
         *exec_fc = MIGRIS_PUS1_FC_EXEC_FAILURE;
     }
+    return 0;
+}
+
+/* Route an accepted PUS-3 TC by subtype: [27] one-shot poll, or one of
+ * the [1]/[2]/[5]/[6] structure-management subtypes. Any other subtype
+ * is an UNKNOWN_SUBTYPE completion failure. */
+static int router_pus3(migris_tc_router_ctx_t* ctx,
+                       const migris_tc_accept_result_t* v,
+                       uint32_t now_seconds,
+                       const uint8_t* tc,
+                       size_t tc_len,
+                       uint8_t* out,
+                       size_t out_cap,
+                       migris_pus1_failure_code_t* exec_fc) {
+    /* accept() verified tc_len equals the declared total and is at
+     * least MIGRIS_TC_ROUTER_MIN_TC (primary + TC sec + CRC), so
+     * app_off + 2 <= tc_len and this subtraction cannot underflow. */
+    const size_t app_off = MIGRIS_CCSDS_PRIMARY_HEADER_SIZE + MIGRIS_PUS_TC_SECONDARY_HEADER_SIZE;
+    const size_t app_len = tc_len - app_off - 2U;
+    const uint8_t* app = &tc[app_off];
+
+    if (v->service_subtype == MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL) {
+        return router_pus3_poll(ctx, v, now_seconds, app, app_len, out, out_cap, exec_fc);
+    }
+    if (v->service_subtype == MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE ||
+        v->service_subtype == MIGRIS_PUS3_SUBTYPE_DELETE_STRUCTURE ||
+        v->service_subtype == MIGRIS_PUS3_SUBTYPE_ENABLE_STRUCTURE ||
+        v->service_subtype == MIGRIS_PUS3_SUBTYPE_DISABLE_STRUCTURE) {
+        return router_pus3_manage(ctx, v, app, app_len, exec_fc);
+    }
+    *exec_fc = MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE;
     return 0;
 }
 
@@ -372,7 +458,7 @@ typedef struct {
 
 static const router_dispatch_entry_t router_dispatch_table[] = {
     {MIGRIS_PUS_SERVICE_TEST, router_pus17},
-    {MIGRIS_PUS_SERVICE_HOUSEKEEPING, router_pus3_oneshot},
+    {MIGRIS_PUS_SERVICE_HOUSEKEEPING, router_pus3},
     {MIGRIS_PUS_SERVICE_ONBOARD_PARAMETER, router_pus20},
     {MIGRIS_PUS_SERVICE_SCHEDULING, router_pus11},
     {MIGRIS_PUS_SERVICE_STORAGE, router_pus15},

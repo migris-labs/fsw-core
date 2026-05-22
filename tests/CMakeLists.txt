@@ -18,6 +18,7 @@ add_executable(
   fdir_test.cpp
   datapool_test.cpp
   schedule_test.cpp
+  hkstore_test.cpp
   pktstore_test.cpp
   largedata_test.cpp
   mode_test.cpp)

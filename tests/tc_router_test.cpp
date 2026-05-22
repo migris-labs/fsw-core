@@ -11,6 +11,7 @@
 
 #include "migris/fsw/datapool/datapool.h"
 #include "migris/fsw/event_sink.h"
+#include "migris/fsw/hkstore/hkstore.h"
 #include "migris/fsw/pktstore/pktstore.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus1.h"
@@ -1073,6 +1074,159 @@ TEST(TcRouter, Pus15ReportEmitsStoreReport) {
     EXPECT_EQ(tms[0].secondary.destination_id, 0xCAFEU);
     EXPECT_EQ(tms[0].primary.seq_count, 0U);
     EXPECT_TRUE(tms[0].crc_ok);
+}
+
+// --- fsw-15: PUS-3 housekeeping structure management -----------------
+
+// [3,1] create-structure application data: SID(2) + parameter-count(1)
+// + parameter ID(2 each) + interval(4), all big-endian.
+std::vector<std::uint8_t>
+pus3_create_app(std::uint16_t sid, const std::vector<std::uint16_t>& ids, std::uint32_t interval) {
+    std::vector<std::uint8_t> a{static_cast<std::uint8_t>(sid >> 8),
+                                static_cast<std::uint8_t>(sid & 0xFFU),
+                                static_cast<std::uint8_t>(ids.size())};
+    for (const std::uint16_t id : ids) {
+        a.push_back(static_cast<std::uint8_t>(id >> 8));
+        a.push_back(static_cast<std::uint8_t>(id & 0xFFU));
+    }
+    a.push_back(static_cast<std::uint8_t>(interval >> 24));
+    a.push_back(static_cast<std::uint8_t>(interval >> 16));
+    a.push_back(static_cast<std::uint8_t>(interval >> 8));
+    a.push_back(static_cast<std::uint8_t>(interval & 0xFFU));
+    return a;
+}
+
+TEST(TcRouterAccept, ClassifiesPus3CreateStructureAsAccepted) {
+    migris_tc_accept_result_t r{};
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                              .service_subtype = MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE,
+                              .source_id = 0x55U},
+                             pus3_create_app(0x0100U, {0x0010U}, 5U));
+    migris_tc_accept(tc.data(), tc.size(), test_apid, &r);
+    EXPECT_EQ(r.addressed, 1);
+    EXPECT_EQ(r.fc, MIGRIS_PUS1_FC_NONE);
+    EXPECT_EQ(r.service_subtype, MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE);
+}
+
+TEST(TcRouter, Pus3CreateStructureMutatesHkstoreAndCompletes) {
+    auto ctx = make_ctx();
+    migris_hkstore_t hk{};
+    migris_hkstore_init(&hk);
+    ctx.hkstore = &hk;
+
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                  .service_subtype = MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x1234U},
+                 pus3_create_app(0x0100U, {0x0010U, 0x0011U}, 30U));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    // A create emits no service TM — only PUS-1 acceptance + completion.
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_key}));
+    EXPECT_EQ(migris_hkstore_count(&hk), 1U);
+    EXPECT_NE(migris_hkstore_find(&hk, 0x0100U), nullptr);
+}
+
+TEST(TcRouter, Pus3EnableStructureMutatesHkstoreAndCompletes) {
+    auto ctx = make_ctx();
+    migris_hkstore_t hk{};
+    migris_hkstore_init(&hk);
+    const std::array<std::uint16_t, 1U> ids{0x0010U};
+    ASSERT_EQ(migris_hkstore_create(&hk, 0x0100U, ids.data(), ids.size(), 5U), MIGRIS_HKSTORE_OK);
+    ctx.hkstore = &hk;
+
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                  .service_subtype = MIGRIS_PUS3_SUBTYPE_ENABLE_STRUCTURE,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x1234U},
+                 sid_app(0x0100U));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_key}));
+    EXPECT_EQ(migris_hkstore_find(&hk, 0x0100U)->enabled, 1);
+}
+
+TEST(TcRouter, Pus3NullHkstoreFailsCompletion) {
+    auto ctx = make_ctx();  // ctx.hkstore is left NULL
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                  .service_subtype = MIGRIS_PUS3_SUBTYPE_CREATE_STRUCTURE,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x9001U},
+                 pus3_create_app(0x0100U, {0x0010U}, 5U));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_fail_key}));
+    EXPECT_EQ(tms[1].failure_code, static_cast<int>(MIGRIS_PUS1_FC_EXEC_FAILURE));
+}
+
+TEST(TcRouter, Pus3DynamicPollEmitsADatapoolBackedReport) {
+    auto ctx = make_ctx();
+    migris_datapool_t dp{};
+    const std::array<migris_dp_param_t, 2U> defs{
+        dp_param(0x0010U, MIGRIS_DP_ACCESS_READ_ONLY, migris_dp_u32(0x11223344U)),
+        dp_param(0x0011U, MIGRIS_DP_ACCESS_READ_ONLY, migris_dp_u16(0x5566U)),
+    };
+    ASSERT_EQ(migris_datapool_init(&dp, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
+    ctx.datapool = &dp;
+    migris_hkstore_t hk{};
+    migris_hkstore_init(&hk);
+    const std::array<std::uint16_t, 2U> ids{0x0010U, 0x0011U};
+    ASSERT_EQ(migris_hkstore_create(&hk, 0x0100U, ids.data(), ids.size(), 0U), MIGRIS_HKSTORE_OK);
+    ctx.hkstore = &hk;
+
+    const auto tc = build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                              .service_subtype = MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL,
+                              .source_id = 0xCAFEU},
+                             sid_app(0x0100U));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 1U);
+    EXPECT_EQ(key(tms[0]), pus3_hk_key);
+    EXPECT_EQ(tms[0].secondary.destination_id, 0xCAFEU);
+    // A dynamic report — SID(2) + u32(4) + u16(2) source data — is
+    // 26 bytes, distinct from the 47-byte frozen FRAMEWORK_DIAG report.
+    EXPECT_EQ(tms[0].size, 26U);
+    EXPECT_EQ(hk_u32(out.data(), 2U), 0x11223344U);  // first parameter, after the SID
+    EXPECT_TRUE(tms[0].crc_ok);
+}
+
+TEST(TcRouter, Pus3PollOfUnknownDynamicSidFailsCompletion) {
+    auto ctx = make_ctx();
+    migris_hkstore_t hk{};
+    migris_hkstore_init(&hk);
+    ctx.hkstore = &hk;  // empty — no structure 0x0200 is defined
+
+    const auto tc =
+        build_tc({.service_type = MIGRIS_PUS_SERVICE_HOUSEKEEPING,
+                  .service_subtype = MIGRIS_PUS3_SUBTYPE_ONE_SHOT_POLL,
+                  .ack_flags = MIGRIS_PUS_TC_ACK_ACCEPTANCE | MIGRIS_PUS_TC_ACK_COMPLETION,
+                  .source_id = 0x9001U},
+                 sid_app(0x0200U));
+    std::array<std::uint8_t, MIGRIS_TC_ROUTER_MAX_TM> out{};
+
+    const int n = migris_tc_router_dispatch(&ctx, 0U, tc.data(), tc.size(), out.data(), out.size());
+    const auto tms = decode_all(out.data(), static_cast<std::size_t>(n));
+    ASSERT_EQ(tms.size(), 2U);
+    EXPECT_EQ((std::array<int, 2>{key(tms[0]), key(tms[1])}),
+              (std::array<int, 2>{pus1_accept_key, pus1_complete_fail_key}));
+    EXPECT_EQ(tms[1].failure_code, static_cast<int>(MIGRIS_PUS1_FC_UNKNOWN_SUBTYPE));
 }
 
 }  // namespace

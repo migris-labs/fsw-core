@@ -77,6 +77,7 @@ target_sources(
           lib/fdir/src/fdir.c
           lib/datapool/src/datapool.c
           lib/schedule/src/schedule.c
+          lib/hkstore/src/hkstore.c
           lib/pktstore/src/pktstore.c
           lib/largedata/src/largedata.c
           lib/mode/src/mode.c)
@@ -88,6 +89,7 @@ target_include_directories(
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/fdir/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/datapool/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/schedule/include>
+         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/hkstore/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/pktstore/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/largedata/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/mode/include>
@@ -163,6 +165,12 @@ install(
 
 install(
   DIRECTORY lib/schedule/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING
+  PATTERN "*.h")
+
+install(
+  DIRECTORY lib/hkstore/include/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING
   PATTERN "*.h")

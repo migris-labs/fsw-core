@@ -86,6 +86,30 @@ config FSW_SCHEDULE_TC_MAX
 	  PUS-17 / PUS-20-class leaf commands of the baseline; a PUS-11
 	  insert carrying a larger telecommand is rejected.
 
+config FSW_HKSTORE_CAPACITY
+	int "On-board housekeeping-structure store capacity (structures)"
+	default 8
+	range 1 256
+	help
+	  Number of ground-defined PUS-3 housekeeping structures the
+	  on-board store can hold. Wired into the freestanding lib via the
+	  MIGRIS_HKSTORE_CAPACITY compile definition so flight and host
+	  builds size the store identically. The store is RAM-backed and
+	  volatile — empty after every reboot.
+
+config FSW_HKSTORE_MAX_PARAMS
+	int "Housekeeping structure maximum parameters"
+	default 8
+	range 1 16
+	help
+	  Upper bound on the datapool parameters one housekeeping structure
+	  may sample, and so on the worst-case dynamic PUS-3[25] report.
+	  Wired into the freestanding lib via the MIGRIS_HKSTORE_MAX_PARAMS
+	  compile definition. Capped at 16 because a [3,27] poll wraps the
+	  report in a PUS-1 acceptance + completion burst that must fit the
+	  fixed 128-byte TC router output buffer (MIGRIS_TC_ROUTER_MAX_TM):
+	  22 + (6 + 10 + 2 + 4*16 + 2) + 22 = 128.
+
 config FSW_PUS11_MAX_PER_TC
 	int "PUS-11 maximum activities per TC"
 	default 8

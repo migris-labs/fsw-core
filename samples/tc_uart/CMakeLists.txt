@@ -12,6 +12,7 @@ set(MIGRIS_FSW_PUS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/pus)
 set(MIGRIS_FSW_FDIR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/fdir)
 set(MIGRIS_FSW_DATAPOOL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/datapool)
 set(MIGRIS_FSW_SCHEDULE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/schedule)
+set(MIGRIS_FSW_HKSTORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/hkstore)
 set(MIGRIS_FSW_PKTSTORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/pktstore)
 set(MIGRIS_FSW_LARGEDATA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/largedata)
 set(MIGRIS_FSW_MODE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/mode)
@@ -35,6 +36,7 @@ target_sources(
           ${MIGRIS_FSW_FDIR_DIR}/src/fdir.c
           ${MIGRIS_FSW_DATAPOOL_DIR}/src/datapool.c
           ${MIGRIS_FSW_SCHEDULE_DIR}/src/schedule.c
+          ${MIGRIS_FSW_HKSTORE_DIR}/src/hkstore.c
           ${MIGRIS_FSW_PKTSTORE_DIR}/src/pktstore.c
           ${MIGRIS_FSW_LARGEDATA_DIR}/src/largedata.c
           ${MIGRIS_FSW_MODE_DIR}/src/mode.c)
@@ -43,6 +45,7 @@ target_include_directories(app PRIVATE ${MIGRIS_FSW_PUS_DIR}/include
                                        ${MIGRIS_FSW_FDIR_DIR}/include
                                        ${MIGRIS_FSW_DATAPOOL_DIR}/include
                                        ${MIGRIS_FSW_SCHEDULE_DIR}/include
+                                       ${MIGRIS_FSW_HKSTORE_DIR}/include
                                        ${MIGRIS_FSW_PKTSTORE_DIR}/include
                                        ${MIGRIS_FSW_LARGEDATA_DIR}/include
                                        ${MIGRIS_FSW_MODE_DIR}/include)
@@ -60,6 +63,8 @@ target_compile_definitions(
           MIGRIS_PUS20_MAX_PARAMS_PER_TC=${CONFIG_FSW_PUS20_MAX_PARAMS}
           MIGRIS_SCHEDULE_CAPACITY=${CONFIG_FSW_SCHEDULE_CAPACITY}
           MIGRIS_SCHEDULE_TC_MAX=${CONFIG_FSW_SCHEDULE_TC_MAX}
+          MIGRIS_HKSTORE_CAPACITY=${CONFIG_FSW_HKSTORE_CAPACITY}
+          MIGRIS_HKSTORE_MAX_PARAMS=${CONFIG_FSW_HKSTORE_MAX_PARAMS}
           MIGRIS_PUS11_MAX_PER_TC=${CONFIG_FSW_PUS11_MAX_PER_TC}
           MIGRIS_PKTSTORE_CAPACITY=${CONFIG_FSW_PKTSTORE_CAPACITY}
           MIGRIS_PKTSTORE_PACKET_MAX=${CONFIG_FSW_PKTSTORE_PACKET_MAX}
