@@ -37,6 +37,7 @@ from _pus import (
     PUS_1_SUBTYPE_ACCEPTANCE_SUCCESS,
     PUS_1_SUBTYPE_COMPLETION_SUCCESS,
     PUS_3_SUBTYPE_HK_PARAM_REPORT,
+    PUS_5_SUBTYPE_HIGH,
     PUS_5_SUBTYPE_INFO,
     PUS_11_SUBTYPE_SUMMARY_REPORT,
     PUS_13_SUBTYPE_FIRST_PART,
@@ -55,6 +56,7 @@ from _pus import (
     PUS_VERSION_C,
     PUS3_HK_SOURCE_DATA_SIZE,
     PUS3_SID_FRAMEWORK_DIAG,
+    PUS5_EVT_FDIR_RECOVERY,
     PUS5_EVT_MODE_CHANGED,
     PUS15_STORE_REPORT_SOURCE_SIZE,
     SEQ_FLAGS_UNSEGMENTED,
@@ -604,3 +606,73 @@ def test_mode_manager_emits_a_mode_changed_event(tc_hk_running) -> None:  # noqa
     assert event.secondary.destination_id == 0  # spontaneous, no triggering TC
     assert event.event_aux == bytes([FSW_MODE_BOOT, FSW_MODE_NOMINAL])
     assert event.crc_ok
+
+
+# The safe mode and the rejected-TC confirmation threshold the tc_uart
+# sample's FDIR-recovery demo uses — must match the tc-hk Kconfig
+# overrides (CONFIG_FSW_FDIR_TC_REJECTED_THRESHOLD). FDIR_ANOM_TC_REJECTED
+# is the anomaly type in the FDIR_RECOVERY aux (lib/fdir/fdir.h).
+FSW_MODE_SAFE = 2
+FDIR_TC_REJECTED_THRESHOLD = 3
+FDIR_ANOM_TC_REJECTED = 0
+
+
+def test_fdir_confirms_repeated_rejections_and_safes_the_spacecraft(  # noqa: F811
+    tc_hk_running,
+) -> None:
+    """The slice fsw-14 headline: a single malformed telecommand is a
+    transient and is not recovered; FDIR_TC_REJECTED_THRESHOLD of them
+    cross the confirmation threshold, and FDIR autonomously emits a
+    high-severity PUS-5 FDIR_RECOVERY event and commands the mode
+    manager to SAFE — observed as a NOMINAL -> SAFE mode change on the
+    live downlink."""
+    _, uart = tc_hk_running
+
+    # Send threshold-many CRC-corrupted telecommands, each with a
+    # distinct source id so the rejections are individually genuine.
+    for i in range(FDIR_TC_REJECTED_THRESHOLD):
+        bad = bytearray(build_pus17_are_you_alive_tc(source_id=0x6100 + i))
+        bad[-1] ^= 0xFF  # corrupt the CRC
+        uart.send(bytes(bad))
+
+    def find_recovery(tms: list[DecodedTm]):
+        return next(
+            (
+                t
+                for t in tms
+                if t.secondary.service_type == PUS_SERVICE_EVENT_REPORTING
+                and t.event_id == PUS5_EVT_FDIR_RECOVERY
+            ),
+            None,
+        )
+
+    tms, recovery = _collect(uart, find_recovery, timeout=60.0)
+    _assert_boot_first(tms)
+
+    # The FDIR_RECOVERY event: high severity, spontaneous; aux is the
+    # anomaly type, the commanded safe mode, and the occurrence count.
+    assert recovery.secondary.service_subtype == PUS_5_SUBTYPE_HIGH
+    assert recovery.secondary.destination_id == 0
+    assert recovery.event_aux[0] == FDIR_ANOM_TC_REJECTED
+    assert recovery.event_aux[1] == FSW_MODE_SAFE
+    assert int.from_bytes(recovery.event_aux[2:4], "big") == FDIR_TC_REJECTED_THRESHOLD
+    assert recovery.crc_ok
+
+    # The autonomous transition: a MODE_CHANGED from NOMINAL to SAFE,
+    # after the recovery event in sequence-count order (cause then
+    # effect on the shared per-APID space).
+    def find_safe_transition(tms: list[DecodedTm]):
+        return next(
+            (
+                t
+                for t in tms
+                if t.secondary.service_type == PUS_SERVICE_EVENT_REPORTING
+                and t.event_id == PUS5_EVT_MODE_CHANGED
+                and t.event_aux == bytes([FSW_MODE_NOMINAL, FSW_MODE_SAFE])
+            ),
+            None,
+        )
+
+    _, transition = _collect(uart, find_safe_transition, timeout=60.0)
+    assert transition.primary.seq_count > recovery.primary.seq_count
+    assert transition.crc_ok

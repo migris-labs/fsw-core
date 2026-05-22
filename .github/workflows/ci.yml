@@ -173,13 +173,14 @@ jobs:
             cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=86400"
           # Housekeeping ELF: same sample, short period so the periodic
           # PUS-3[25] cadence is fast and deterministic, plus the PUS-13
-          # large-data demo and the fsw-13 mode-manager demo enabled so
-          # their closed-loops have observable telemetry (test_tc_uart_hk.py).
+          # large-data, fsw-13 mode-manager and fsw-14 FDIR-recovery
+          # demos enabled so their closed-loops have observable
+          # telemetry (test_tc_uart_hk.py).
           - name: samples/tc_uart (hk)
             path: samples/tc_uart
             build_dir: zephyr-tc-hk
             artefact: fsw-core-tc-hk-nucleo_h753zi
-            cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=2 -DCONFIG_FSW_LARGEDATA_DEMO=y -DCONFIG_FSW_MODE_DEMO=y"
+            cmake_extra: "-- -DCONFIG_FSW_PUS3_HK_PERIOD_SEC=2 -DCONFIG_FSW_LARGEDATA_DEMO=y -DCONFIG_FSW_MODE_DEMO=y -DCONFIG_FSW_FDIR_RECOVERY_DEMO=y"
     env:
       ZEPHYR_SDK_VERSION: "0.16.8"
     steps:

@@ -168,3 +168,29 @@ config FSW_MODE_CAPACITY
 	  identically. This sample defines three modes (boot, nominal,
 	  safe); the default (8) leaves room for a mission to add more.
 	  Capped at 32 — a mode ID must fit the allowed-target bitmask.
+
+config FSW_FDIR_RECOVERY_DEMO
+	bool "Arm FDIR autonomous recovery to SAFE mode"
+	depends on FSW_MODE_DEMO
+	default n
+	help
+	  When set, the tc_uart sample arms FDIR isolation/recovery: after
+	  CONFIG_FSW_FDIR_TC_REJECTED_THRESHOLD rejected telecommands FDIR
+	  confirms the fault, emits a high-severity PUS-5 FDIR_RECOVERY
+	  event, and autonomously commands the mode manager to SAFE. Left
+	  off by default — the verification-stream ELF (test_tc_uart.py)
+	  reads a fixed byte count per stimulus and must not see the extra
+	  recovery telemetry. The Renode housekeeping build turns it on for
+	  the closed-loop in test_tc_uart_hk.py. Depends on FSW_MODE_DEMO:
+	  recovery needs the mode manager as its transition target.
+
+config FSW_FDIR_TC_REJECTED_THRESHOLD
+	int "Rejected-telecommand occurrences that confirm the fault"
+	depends on FSW_FDIR_RECOVERY_DEMO
+	default 3
+	range 1 65535
+	help
+	  Number of rejected telecommands FDIR counts before it confirms a
+	  TC_REJECTED fault and triggers autonomous recovery. A single
+	  transient rejection must never safe the spacecraft — this is the
+	  debounce count.
