@@ -141,3 +141,30 @@ config FSW_LARGEDATA_DEMO
 	  default: the verification-stream ELF (test_tc_uart.py) reads a
 	  fixed byte count per stimulus and must not see unsolicited
 	  large-data telemetry. The Renode housekeeping build turns it on.
+
+config FSW_MODE_DEMO
+	bool "Run an operating-mode-manager demo at boot"
+	default n
+	help
+	  When set, the tc_uart sample wires an operating-mode manager and
+	  performs one demo transition at boot (BOOT -> NOMINAL); the mode
+	  manager announces it as a spontaneous PUS-5 MODE_CHANGED event.
+	  The mode manager (lib/mode/) has no inbound telecommand — a
+	  ground mode-commanding service is downstream (cry4-fsw) — so the
+	  demo is the observable surface for the closed-loop test in
+	  tests/renode/test_tc_uart_hk.py. Left off by default for the
+	  same reason as FSW_LARGEDATA_DEMO: the verification-stream ELF
+	  reads a fixed byte count per stimulus. The housekeeping build
+	  turns it on.
+
+config FSW_MODE_CAPACITY
+	int "Operating-mode manager capacity (modes)"
+	default 8
+	range 2 32
+	help
+	  Number of distinct operating modes the on-board mode manager can
+	  hold. Wired into the freestanding lib via the MIGRIS_MODE_CAPACITY
+	  compile definition so flight and host builds size the manager
+	  identically. This sample defines three modes (boot, nominal,
+	  safe); the default (8) leaves room for a mission to add more.
+	  Capped at 32 — a mode ID must fit the allowed-target bitmask.

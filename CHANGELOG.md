@@ -8,6 +8,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-13: operating-mode manager.** The framework's first
+  operating-state abstraction — a generic mode / state-machine
+  primitive. A spacecraft runs in one of a small set of operating
+  modes (boot, safe, nominal, payload-active) with only certain
+  transitions between them legal; the mode manager holds the current
+  mode, checks a transition request against a table of allowed
+  transitions, and announces a successful change. A new freestanding C
+  subtree `lib/mode/` (with its own C-friendly `.clang-tidy`) carries
+  it. Like the datapool and the schedule it is **mission-agnostic** —
+  fsw-core hard-codes no modes; the application supplies the mode set
+  and the allowed transitions at init. A mode is a numbered 1-byte ID
+  (names live in the ground MIB); each declared mode carries a bitmask
+  of the modes it may transition to, an O(1) "is this transition
+  allowed" test. A successful transition is announced through the
+  fsw-8 event-sink seam as a new framework PUS-5 event
+  **`MODE_CHANGED`** (event ID `0x0004`, severity info, aux = previous
+  then new mode ID) — no new wire packet type, no codec change. The
+  `tc_uart` sample, under a new `CONFIG_FSW_MODE_DEMO` Kconfig, defines
+  a three-mode set (boot / nominal / safe) and performs one
+  BOOT → NOMINAL transition at boot; the Renode housekeeping build
+  turns the demo on so the closed-loop has an observable transition.
+  New host suite `tests/mode_test.cpp`;
+  `tests/renode/test_tc_uart_hk.py` gains a `MODE_CHANGED` round-trip.
+  The event ID is added to [`docs/wire/pus-5.md`](docs/wire/pus-5.md)
+  — a non-breaking addition within the reserved framework block.
+  Scoped decisions:
+  - **No mode-commanding PUS service.** A ground mode-change
+    telecommand is a vendor PUS-128-range service; per the pinned
+    "PUS-128+ vendor assignments live in cry4 / cry4-fsw, not
+    fsw-core" decision it belongs downstream. fsw-13 ships the generic
+    primitive and its C API only — no PUS service, no TC-router change
+    (exactly fsw-12's telemetry-only PUS-13 decision). *Trigger*:
+    cry4-fsw defining its mode-commanding service, which will hold a
+    `migris_mode_manager_t*` and map `MIGRIS_MODE_ERR_FORBIDDEN` to a
+    PUS-1[8] completion failure.
+  - **No FDIR-driven autonomous transition.** fsw-8 deferred FDIR
+    Isolation/Recovery — "recovery actions, mode transitions …
+    presuppose a mode manager" — and named this slice as the trigger.
+    fsw-13 supplies the mechanism (`migris_mode_request`) FDIR will
+    call; wiring FDIR to autonomously demand a safe mode on a
+    confirmed fault needs occurrence counters and debounce that do not
+    exist yet. *Trigger*: the first FDIR slice adding occurrence
+    thresholds and a defined recovery action.
+  - **A rejected transition emits no event.** A forbidden transition
+    returns `MIGRIS_MODE_ERR_FORBIDDEN` only; no anomaly is raised —
+    the sole caller this slice (the sample demo) controls its own
+    requests, and a rejected ground-commanded transition is properly
+    the downstream service's concern. *Trigger*: the first caller that
+    can request a forbidden transition from an unverified path.
+  - **The current mode is not in housekeeping.** The PUS-3[25]
+    housekeeping source data is a frozen 27-byte block; adding a
+    current-mode field is a breaking wire change. The `MODE_CHANGED`
+    event already gives ground every transition. *Trigger*: a PUS-3
+    structure able to carry the mode, or a mission requirement for a
+    polled current-mode field.
+  - **No mode-gated behaviour.** fsw-13 is a pure state-machine
+    primitive — the sample does not make schedule release or
+    housekeeping cadence mode-dependent. A consumer that reacts to the
+    mode is the future FDIR recovery path or a mission payload.
+    *Trigger*: the first subsystem with a defined mode-dependent
+    behaviour.
+  - **Mode set bounded at 32 IDs.** The allowed-target bitmask is a
+    `uint32_t`, so a mode ID must be below 32; the mode-set capacity
+    is the separate compile-time `MIGRIS_MODE_CAPACITY`. *Trigger*: a
+    mission needing more than 32 distinct modes.
 - **Slice fsw-12: PUS-13 large data transfer (downlink).** The
   framework's first mechanism for downlinking a unit of data larger
   than a single CCSDS Space Packet — a schedule detail report, a

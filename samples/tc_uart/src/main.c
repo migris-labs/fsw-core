@@ -64,6 +64,17 @@
  * RAM-backed and volatile (empty after a reboot). Wire format is
  * pinned in docs/wire/pus-15.md.
  *
+ * Slice fsw-13 adds an operating-mode manager. When
+ * CONFIG_FSW_MODE_DEMO is set, the sample defines a small mode set
+ * (boot, nominal, safe) and its allowed transitions, then performs one
+ * transition at boot — boot to nominal — which the mode manager
+ * announces as a spontaneous PUS-5 MODE_CHANGED event through the FDIR
+ * sink. The mode manager has no inbound telecommand (a ground
+ * mode-commanding service is downstream), so the demo is the
+ * observable surface for the closed-loop test; like the fsw-12
+ * large-data demo it is off in the verification-stream build. Wire
+ * format of the event is pinned in docs/wire/pus-5.md.
+ *
  * Slice fsw-12 adds a PUS-13 large-data downlink. When
  * CONFIG_FSW_LARGEDATA_DEMO is set, the sample starts one transfer of
  * a synthetic data unit at boot and, each main-loop iteration, emits
@@ -94,6 +105,7 @@
 #include "migris/fsw/datapool/datapool.h"
 #include "migris/fsw/fdir/fdir.h"
 #include "migris/fsw/largedata/largedata.h"
+#include "migris/fsw/mode/mode.h"
 #include "migris/fsw/pktstore/pktstore.h"
 #include "migris/fsw/pus/ccsds.h"
 #include "migris/fsw/pus/pus11.h"
@@ -177,6 +189,19 @@ static migris_pktstore_t store;
 #    define LARGEDATA_DEMO_TRANSACTION_ID 0x0001U
 static migris_largedata_session_t largedata;
 static uint8_t largedata_demo_unit[LARGEDATA_DEMO_UNIT_LEN];
+#endif
+
+#ifdef CONFIG_FSW_MODE_DEMO
+/* On-board operating-mode manager (slice fsw-13). The mode manager has
+ * no inbound telecommand — a ground mode-commanding service is
+ * downstream (cry4-fsw) — so the sample drives it directly: it defines
+ * a small mode set and performs one demo transition at boot, which the
+ * manager announces as a spontaneous PUS-5 MODE_CHANGED event.
+ * File-scope for consistency with the other on-board stores. */
+#    define FSW_MODE_BOOT 0U
+#    define FSW_MODE_NOMINAL 1U
+#    define FSW_MODE_SAFE 2U
+static migris_mode_manager_t mode_mgr;
 #endif
 
 static void uart_isr(const struct device* dev, void* user_data) {
@@ -316,6 +341,22 @@ int main(void) {
         &largedata, LARGEDATA_DEMO_TRANSACTION_ID, largedata_demo_unit, LARGEDATA_DEMO_UNIT_LEN);
 #endif
 
+#ifdef CONFIG_FSW_MODE_DEMO
+    /* Slice fsw-13: wire the operating-mode manager. The mode set and
+     * its allowed transitions are sample-defined — fsw-core hard-codes
+     * no modes. BOOT may go to NOMINAL or SAFE; NOMINAL and SAFE may
+     * swap. The FDIR sink carries the MODE_CHANGED event. The mode set
+     * is a fixed, compile-time-correct constant, so the init cannot
+     * fail. */
+    const migris_mode_def_t mode_defs[] = {
+        {FSW_MODE_BOOT, (1U << FSW_MODE_NOMINAL) | (1U << FSW_MODE_SAFE)},
+        {FSW_MODE_NOMINAL, 1U << FSW_MODE_SAFE},
+        {FSW_MODE_SAFE, 1U << FSW_MODE_NOMINAL},
+    };
+    (void)migris_mode_init(
+        &mode_mgr, mode_defs, sizeof(mode_defs) / sizeof(mode_defs[0]), FSW_MODE_BOOT, &fdir_sink);
+#endif
+
     uint8_t tc[TC_BUF_SIZE];
     uint8_t out[MIGRIS_TC_ROUTER_MAX_TM];
     size_t have = 0U;
@@ -345,6 +386,14 @@ int main(void) {
     if (boot_n > 0) {
         transmit_tm(uart_dev, boot_sec, out, (size_t)boot_n);
     }
+
+#ifdef CONFIG_FSW_MODE_DEMO
+    /* Slice fsw-13: the boot-time mode transition. Once the FSW is up,
+     * leave BOOT for NOMINAL; the mode manager enqueues a PUS-5
+     * MODE_CHANGED event through the FDIR sink, drained onto the wire
+     * by the loop's FDIR tick like any other event. */
+    (void)migris_mode_request(&mode_mgr, FSW_MODE_NOMINAL, boot_sec);
+#endif
 
     /* Slice fsw-7: spontaneous periodic PUS-3[25] housekeeping report.
      * `pus3_ctx` is sample-local. The first report fires one full
