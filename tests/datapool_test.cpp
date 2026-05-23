@@ -336,5 +336,151 @@ TEST(Datapool, SetRejectsUnknownIdAndNullArgs) {
     EXPECT_EQ(migris_datapool_set(nullptr, 0x0001U, &v), MIGRIS_DATAPOOL_ERR_BAD_ARG);
 }
 
+// --- slice fsw-16: generation counter + serialize / deserialize ------
+
+TEST(Datapool, GenerationStartsAtZeroAndBumpsOnEachSet) {
+    const std::array<migris_dp_param_t, 1U> defs{
+        param(0x0001U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_u32(10U)),
+    };
+    migris_datapool_t dp{};
+    ASSERT_EQ(migris_datapool_init(&dp, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_datapool_generation(&dp), 0U);
+
+    const migris_dp_value_t v1 = migris_dp_u32(20U);
+    ASSERT_EQ(migris_datapool_set(&dp, 0x0001U, &v1), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_datapool_generation(&dp), 1U);
+    const migris_dp_value_t v2 = migris_dp_u32(30U);
+    ASSERT_EQ(migris_datapool_set(&dp, 0x0001U, &v2), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_datapool_generation(&dp), 2U);
+
+    // A rejected set must NOT bump the counter — it is a marker for
+    // a real mutation that needs persisting.
+    const migris_dp_value_t wrong = migris_dp_u16(99U);
+    EXPECT_EQ(migris_datapool_set(&dp, 0x0001U, &wrong), MIGRIS_DATAPOOL_ERR_TYPE);
+    EXPECT_EQ(migris_datapool_generation(&dp), 2U);
+}
+
+TEST(Datapool, SerializeDeserializeRoundTrip) {
+    const std::array<migris_dp_param_t, 3U> defs{
+        param(0x0001U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_u32(0x11223344U)),
+        param(0x0002U, MIGRIS_DP_ACCESS_READ_ONLY, migris_dp_u16(0x5566U)),
+        param(0x0003U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_i16(-1234)),
+    };
+    migris_datapool_t src{};
+    ASSERT_EQ(migris_datapool_init(&src, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
+    // Mutate one parameter so the persisted value differs from the
+    // initial seed.
+    const migris_dp_value_t v = migris_dp_u32(0xAABBCCDDU);
+    ASSERT_EQ(migris_datapool_set(&src, 0x0001U, &v), MIGRIS_DATAPOOL_OK);
+
+    std::array<std::uint8_t, 64U> buf{};
+    const int n = migris_datapool_serialize(&src, buf.data(), buf.size());
+    ASSERT_GT(n, 0);
+    // 2 (count) + 3 * (2 id + 1 type) + (4 + 2 + 2) = 19 bytes.
+    EXPECT_EQ(n, 19);
+
+    // A fresh pool seeded from defs — deserialize must restore the
+    // mutated value from the image, not the seeded one.
+    migris_datapool_t dst{};
+    ASSERT_EQ(migris_datapool_init(&dst, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
+    ASSERT_EQ(migris_datapool_deserialize(&dst, buf.data(), static_cast<std::size_t>(n)),
+              MIGRIS_DATAPOOL_OK);
+    migris_dp_value_t got{};
+    ASSERT_EQ(migris_datapool_get(&dst, 0x0001U, &got), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_dp_as_u32(&got), 0xAABBCCDDU);
+    ASSERT_EQ(migris_datapool_get(&dst, 0x0002U, &got), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_dp_as_u16(&got), 0x5566U);
+    ASSERT_EQ(migris_datapool_get(&dst, 0x0003U, &got), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_dp_as_i16(&got), -1234);
+
+    // Deserialize must NOT bump the generation counter (a restore is
+    // not an operator set) — the sample's "have I changed since the
+    // last save?" loop must not double-save on every boot.
+    EXPECT_EQ(migris_datapool_generation(&dst), 0U);
+}
+
+TEST(Datapool, DeserializeSkipsUnknownIds) {
+    // Source pool has param 0x0001; destination pool has 0x0002.
+    const std::array<migris_dp_param_t, 1U> src_defs{
+        param(0x0001U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_u32(0xDEADBEEFU)),
+    };
+    migris_datapool_t src{};
+    ASSERT_EQ(migris_datapool_init(&src, src_defs.data(), src_defs.size()), MIGRIS_DATAPOOL_OK);
+    std::array<std::uint8_t, 32U> buf{};
+    const int n = migris_datapool_serialize(&src, buf.data(), buf.size());
+    ASSERT_GT(n, 0);
+
+    const std::array<migris_dp_param_t, 1U> dst_defs{
+        param(0x0002U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_u32(7U)),
+    };
+    migris_datapool_t dst{};
+    ASSERT_EQ(migris_datapool_init(&dst, dst_defs.data(), dst_defs.size()), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_datapool_deserialize(&dst, buf.data(), static_cast<std::size_t>(n)),
+              MIGRIS_DATAPOOL_OK);
+    // The unknown id (0x0001) is skipped; the destination's 0x0002 is
+    // unchanged.
+    migris_dp_value_t got{};
+    ASSERT_EQ(migris_datapool_get(&dst, 0x0002U, &got), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_dp_as_u32(&got), 7U);
+}
+
+TEST(Datapool, DeserializeRejectsOutOfRangeTypeCode) {
+    // Hand-build an image with a single record whose type byte is 99
+    // (outside the migris_dp_type_t enumerator range). The deserialize
+    // must reject it BEFORE casting it to the enum — the cast is
+    // undefined behaviour in C99 for out-of-range values.
+    const std::array<std::uint8_t, 7U> image{
+        0x00U,
+        0x01U,  // count = 1
+        0x00U,
+        0x01U,  // id
+        99U,    // type — out of range
+        0x00U,
+        0x00U,  // (would be the value, never read)
+    };
+    migris_datapool_t dp{};
+    ASSERT_EQ(migris_datapool_init(&dp, nullptr, 0U), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_datapool_deserialize(&dp, image.data(), image.size()),
+              MIGRIS_DATAPOOL_ERR_TYPE);
+}
+
+TEST(Datapool, SerializeRejectsTooSmallBuffer) {
+    const std::array<migris_dp_param_t, 1U> defs{
+        param(0x0001U, MIGRIS_DP_ACCESS_READ_WRITE, migris_dp_u32(1U)),
+    };
+    migris_datapool_t dp{};
+    ASSERT_EQ(migris_datapool_init(&dp, defs.data(), defs.size()), MIGRIS_DATAPOOL_OK);
+    std::array<std::uint8_t, 4U> tiny{};  // not enough for 2+2+1+4 = 9
+    EXPECT_EQ(migris_datapool_serialize(&dp, tiny.data(), tiny.size()),
+              MIGRIS_DATAPOOL_ERR_BUF_TOO_SMALL);
+}
+
+TEST(Datapool, DeserializeRejectsTruncatedImage) {
+    // Image claims one record but is missing the value bytes.
+    const std::array<std::uint8_t, 5U> truncated{
+        0x00U,
+        0x01U,  // count = 1
+        0x00U,
+        0x01U,                                          // id
+        static_cast<std::uint8_t>(MIGRIS_DP_TYPE_U32),  // type (4-byte value)
+        // value bytes missing
+    };
+    migris_datapool_t dp{};
+    ASSERT_EQ(migris_datapool_init(&dp, nullptr, 0U), MIGRIS_DATAPOOL_OK);
+    EXPECT_EQ(migris_datapool_deserialize(&dp, truncated.data(), truncated.size()),
+              MIGRIS_DATAPOOL_ERR_BUF_TOO_SMALL);
+}
+
+TEST(Datapool, RejectsNullArgs) {
+    const std::array<std::uint8_t, 4U> buf{};
+    migris_datapool_t dp{};
+    EXPECT_EQ(migris_datapool_serialize(nullptr, nullptr, 0U), MIGRIS_DATAPOOL_ERR_BAD_ARG);
+    EXPECT_EQ(migris_datapool_serialize(&dp, nullptr, 0U), MIGRIS_DATAPOOL_ERR_BAD_ARG);
+    EXPECT_EQ(migris_datapool_deserialize(nullptr, buf.data(), buf.size()),
+              MIGRIS_DATAPOOL_ERR_BAD_ARG);
+    EXPECT_EQ(migris_datapool_deserialize(&dp, nullptr, buf.size()), MIGRIS_DATAPOOL_ERR_BAD_ARG);
+    EXPECT_EQ(migris_datapool_generation(nullptr), 0U);
+}
+
 }  // namespace
 }  // namespace migris::fsw::datapool::test

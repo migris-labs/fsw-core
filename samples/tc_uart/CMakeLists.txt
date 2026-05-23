@@ -16,10 +16,12 @@ set(MIGRIS_FSW_HKSTORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/hkstore)
 set(MIGRIS_FSW_PKTSTORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/pktstore)
 set(MIGRIS_FSW_LARGEDATA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/largedata)
 set(MIGRIS_FSW_MODE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/mode)
+set(MIGRIS_FSW_NVSTORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/nvstore)
 
 target_sources(
   app
   PRIVATE src/main.c
+          src/nv_flash_backend.c
           ${MIGRIS_FSW_PUS_DIR}/src/ccsds.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus_tc.c
           ${MIGRIS_FSW_PUS_DIR}/src/pus_tm.c
@@ -39,7 +41,8 @@ target_sources(
           ${MIGRIS_FSW_HKSTORE_DIR}/src/hkstore.c
           ${MIGRIS_FSW_PKTSTORE_DIR}/src/pktstore.c
           ${MIGRIS_FSW_LARGEDATA_DIR}/src/largedata.c
-          ${MIGRIS_FSW_MODE_DIR}/src/mode.c)
+          ${MIGRIS_FSW_MODE_DIR}/src/mode.c
+          ${MIGRIS_FSW_NVSTORE_DIR}/src/nvstore.c)
 
 target_include_directories(app PRIVATE ${MIGRIS_FSW_PUS_DIR}/include
                                        ${MIGRIS_FSW_FDIR_DIR}/include
@@ -48,7 +51,8 @@ target_include_directories(app PRIVATE ${MIGRIS_FSW_PUS_DIR}/include
                                        ${MIGRIS_FSW_HKSTORE_DIR}/include
                                        ${MIGRIS_FSW_PKTSTORE_DIR}/include
                                        ${MIGRIS_FSW_LARGEDATA_DIR}/include
-                                       ${MIGRIS_FSW_MODE_DIR}/include)
+                                       ${MIGRIS_FSW_MODE_DIR}/include
+                                       ${MIGRIS_FSW_NVSTORE_DIR}/include)
 
 # Size the freestanding event FIFO, the parameter datapool, the
 # schedule store, the packet store, and the PUS-20 / PUS-11 per-TC

@@ -1,0 +1,39 @@
+---
+# Migris fsw-core — clang-tidy override for the freestanding C
+# non-volatile-storage layer (the A/B-redundant flash image format).
+#
+# `lib/nvstore/` is C source compiled by both the Zephyr cross
+# toolchain (Cortex-M7) and the host C++ toolchain (linked into
+# migris::fsw-core for unit testing) — identical dual-use to
+# `lib/pus/`, `lib/fdir/`, `lib/datapool/`, `lib/schedule/`,
+# `lib/pktstore/`, `lib/largedata/`, `lib/mode/` and `lib/hkstore/`,
+# so the same rule adjustments apply:
+#
+#   * Headers use <stdint.h> / <stddef.h>, not <cstdint> / <cstddef>:
+#     the C side cannot include the C++ headers. Silence
+#     hicpp / modernize "deprecated headers" checks here.
+#   * Typedefs and enum constants follow the C convention (snake_case
+#     ending in `_t`, UPPER_CASE for enum constants and macros). The
+#     parent config's CamelCase typedef rule is a C++ rule and does
+#     not apply to the C ABI surface.
+
+InheritParentConfig: true
+
+# Constrain clang-tidy to lib/ headers when checking the C TUs in this
+# directory — keeps the C ABI surface analysed without polluting C++ TU
+# diagnostics from other directories.
+HeaderFilterRegex: '^lib/.*'
+
+Checks: >
+  -hicpp-deprecated-headers,
+  -modernize-deprecated-headers,
+  -modernize-macro-to-enum,
+  -bugprone-macro-parentheses
+
+CheckOptions:
+  - { key: readability-identifier-naming.TypedefCase,                value: lower_case }
+  - { key: readability-identifier-naming.TypedefSuffix,              value: _t          }
+  - { key: readability-identifier-naming.EnumCase,                   value: lower_case }
+  - { key: readability-identifier-naming.EnumSuffix,                 value: _t          }
+  - { key: readability-identifier-naming.EnumConstantCase,           value: UPPER_CASE }
+  - { key: readability-identifier-naming.StructCase,                 value: lower_case }

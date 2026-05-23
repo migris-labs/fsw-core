@@ -218,3 +218,4 @@ config FSW_FDIR_TC_REJECTED_THRESHOLD
 	  TC_REJECTED fault and triggers autonomous recovery. A single
 	  transient rejection must never safe the spacecraft — this is the
 	  debounce count.
+

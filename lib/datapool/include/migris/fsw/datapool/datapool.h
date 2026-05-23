@@ -122,13 +122,21 @@ typedef struct {
     migris_dp_value_t value;
 } migris_dp_param_t;
 
-/** The datapool. Caller-owned, RAM-only and volatile — parameters
- *  reset to their initial values whenever ``migris_datapool_init`` runs
- *  (on every reboot). Zero-initialise once, then call
- *  ``migris_datapool_init``. */
+/** The datapool. Caller-owned. Volatile values reset to their initial
+ *  contents on every ``migris_datapool_init`` call; the non-volatile
+ *  storage layer (``lib/nvstore/``, slice fsw-16) is what restores
+ *  operator-tuned values across a reboot.
+ *
+ *  ``generation`` is monotonically incremented on every successful
+ *  ``migris_datapool_set`` — the tc_uart sample (and any future
+ *  consumer) polls it to detect a mutation since the last save without
+ *  re-reading each parameter. The field is RAM-only: it starts at 0 on
+ *  every boot, is bumped by sets, and is NOT included in the on-flash
+ *  serialised image (which carries values only, not their counters). */
 typedef struct {
     migris_dp_param_t params[MIGRIS_DATAPOOL_CAPACITY];
     size_t count;
+    uint32_t generation;
 } migris_datapool_t;
 
 /** Datapool / value-codec return and error codes. Same convention as
@@ -214,11 +222,41 @@ int migris_datapool_get(const migris_datapool_t* dp,
  *  with ``MIGRIS_DATAPOOL_ERR_NOT_FOUND`` if the ID is not in the pool,
  *  ``MIGRIS_DATAPOOL_ERR_TYPE`` if ``value->type`` differs from the
  *  parameter's declared type, or ``MIGRIS_DATAPOOL_ERR_READ_ONLY`` if
- *  the parameter is read-only. Returns ``MIGRIS_DATAPOOL_OK`` on a
- *  successful write. */
+ *  the parameter is read-only. On success the pool's ``generation``
+ *  counter is incremented — a consumer polling it detects the mutation
+ *  without re-reading every parameter. Returns ``MIGRIS_DATAPOOL_OK``. */
 int migris_datapool_set(migris_datapool_t* dp,
                         migris_dp_param_id_t id,
                         const migris_dp_value_t* value);
+
+/** Mutation counter — strictly monotonic, bumped on every successful
+ *  ``migris_datapool_set``. Lets the application save the pool to NVM
+ *  when it changes without polling each parameter. Returns ``0`` on a
+ *  NULL store. Resets to ``0`` on every ``migris_datapool_init`` (the
+ *  field is NOT persisted — a fresh boot starts at 0 even after a
+ *  restored image). */
+uint32_t migris_datapool_generation(const migris_datapool_t* dp);
+
+/** Serialise every parameter into ``out`` as a contiguous byte stream
+ *  for the ``lib/nvstore/`` persistence layer: ``count(2 BE) +
+ *  {id(2 BE), type(1), value(width-per-type, BE)}*``. The access policy
+ *  is NOT serialised — it is a code-defined attribute, not operator
+ *  state. Returns the positive byte count written on success, or a
+ *  negative ``migris_datapool_status_t`` (``_ERR_BUF_TOO_SMALL`` /
+ *  ``_ERR_BAD_ARG``). */
+int migris_datapool_serialize(const migris_datapool_t* dp, uint8_t* out, size_t out_cap);
+
+/** Restore parameter values from a previously serialised image: for
+ *  each ``(id, type, value)`` record, find the matching parameter in
+ *  the pool and, if the on-flash type matches the parameter's declared
+ *  type, restore the value. Unknown ids and type-mismatches are
+ *  silently skipped — robust to a parameter set that changed across a
+ *  firmware update. The pool's ``generation`` counter is NOT bumped
+ *  (this is a restore, not an operator set). Returns
+ *  ``MIGRIS_DATAPOOL_OK`` on a complete decode, ``_ERR_BAD_ARG`` on a
+ *  NULL argument, ``_ERR_TYPE`` if a record carries an out-of-range
+ *  type, or ``_ERR_BUF_TOO_SMALL`` if the image is truncated. */
+int migris_datapool_deserialize(migris_datapool_t* dp, const uint8_t* in, size_t in_len);
 
 #ifdef __cplusplus
 }  // extern "C"

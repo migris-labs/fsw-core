@@ -80,7 +80,8 @@ target_sources(
           lib/hkstore/src/hkstore.c
           lib/pktstore/src/pktstore.c
           lib/largedata/src/largedata.c
-          lib/mode/src/mode.c)
+          lib/mode/src/mode.c
+          lib/nvstore/src/nvstore.c)
 
 target_include_directories(
   fsw-core
@@ -93,6 +94,7 @@ target_include_directories(
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/pktstore/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/largedata/include>
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/mode/include>
+         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib/nvstore/include>
          $<INSTALL_INTERFACE:include>)
 
 target_compile_features(fsw-core PUBLIC cxx_std_20 c_std_99)
@@ -189,6 +191,12 @@ install(
 
 install(
   DIRECTORY lib/mode/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING
+  PATTERN "*.h")
+
+install(
+  DIRECTORY lib/nvstore/include/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   FILES_MATCHING
   PATTERN "*.h")

@@ -274,6 +274,7 @@ int migris_datapool_init(migris_datapool_t* dp, const migris_dp_param_t* params,
     /* Empty until validation passes — a failed init leaves no
      * half-populated pool behind (stateless failure). */
     dp->count = 0U;
+    dp->generation = 0U;
     if (n > MIGRIS_DATAPOOL_CAPACITY) {
         return MIGRIS_DATAPOOL_ERR_CAPACITY;
     }
@@ -332,7 +333,99 @@ int migris_datapool_set(migris_datapool_t* dp,
             return MIGRIS_DATAPOOL_ERR_READ_ONLY;
         }
         dp->params[i].value = *value;
+        dp->generation++;
         return MIGRIS_DATAPOOL_OK;
     }
     return MIGRIS_DATAPOOL_ERR_NOT_FOUND;
+}
+
+uint32_t migris_datapool_generation(const migris_datapool_t* dp) {
+    return (dp == NULL) ? 0U : dp->generation;
+}
+
+/* --- Serialisation (slice fsw-16) -------------------------------- */
+
+/* Layout: count(2 BE) + repeated { id(2 BE), type(1), value(width per
+ * type, BE) }. The value width is type-determined and the codec is the
+ * existing big-endian one (migris_dp_value_encode / _decode) — the
+ * on-flash image is byte-identical to the same parameter's PUS-20 wire
+ * value, so a future tool could share decoders. The access policy is
+ * deliberately NOT serialised: it is a code-defined attribute, not
+ * operator state. The generation counter is RAM-only. */
+int migris_datapool_serialize(const migris_datapool_t* dp, uint8_t* out, size_t out_cap) {
+    if (dp == NULL || out == NULL) {
+        return MIGRIS_DATAPOOL_ERR_BAD_ARG;
+    }
+    if (out_cap < 2U) {
+        return MIGRIS_DATAPOOL_ERR_BUF_TOO_SMALL;
+    }
+    out[0] = (uint8_t)(dp->count >> 8);
+    out[1] = (uint8_t)(dp->count & 0xFFU);
+    size_t off = 2U;
+    for (size_t i = 0U; i < dp->count; ++i) {
+        const migris_dp_param_t* p = &dp->params[i];
+        if (out_cap - off < 3U) {
+            return MIGRIS_DATAPOOL_ERR_BUF_TOO_SMALL;
+        }
+        out[off] = (uint8_t)(p->id >> 8);
+        out[off + 1U] = (uint8_t)(p->id & 0xFFU);
+        out[off + 2U] = (uint8_t)p->value.type;
+        off += 3U;
+        const int written = migris_dp_value_encode(&p->value, &out[off], out_cap - off);
+        if (written < 0) {
+            return written;
+        }
+        off += (size_t)written;
+    }
+    return (int)off;
+}
+
+int migris_datapool_deserialize(migris_datapool_t* dp, const uint8_t* in, size_t in_len) {
+    if (dp == NULL || in == NULL) {
+        return MIGRIS_DATAPOOL_ERR_BAD_ARG;
+    }
+    if (in_len < 2U) {
+        return MIGRIS_DATAPOOL_ERR_BUF_TOO_SMALL;
+    }
+    const uint16_t count = (uint16_t)(((uint16_t)in[0] << 8) | (uint16_t)in[1]);
+    size_t off = 2U;
+    for (uint16_t i = 0U; i < count; ++i) {
+        if (off + 3U > in_len) {
+            return MIGRIS_DATAPOOL_ERR_BUF_TOO_SMALL;
+        }
+        const migris_dp_param_id_t id =
+            (migris_dp_param_id_t)(((uint16_t)in[off] << 8) | (uint16_t)in[off + 1U]);
+        const uint8_t type_code = in[off + 2U];
+        off += 3U;
+        /* Range-check before the cast — casting an out-of-enum-range
+         * integer to an unscoped enum is undefined behaviour in C99
+         * and trips the GCC `-Wconversion` / clang-tidy
+         * `EnumCastOutOfRange` checks (the fsw-9 lesson). */
+        if (type_code > (uint8_t)MIGRIS_DP_TYPE_F32) {
+            return MIGRIS_DATAPOOL_ERR_TYPE;
+        }
+        const migris_dp_type_t type = (migris_dp_type_t)type_code;
+        const size_t width = migris_dp_type_width(type);
+        if (width == 0U) {
+            return MIGRIS_DATAPOOL_ERR_TYPE;
+        }
+        if (off + width > in_len) {
+            return MIGRIS_DATAPOOL_ERR_BUF_TOO_SMALL;
+        }
+        migris_dp_value_t value = {0};
+        const int consumed = migris_dp_value_decode(&value, type, &in[off], in_len - off);
+        if (consumed < 0) {
+            return consumed;
+        }
+        off += (size_t)consumed;
+        /* Restore by id+type match; tolerate unknown ids and type
+         * changes (a firmware update may have evolved the set). */
+        for (size_t j = 0U; j < dp->count; ++j) {
+            if (dp->params[j].id == id && dp->params[j].value.type == type) {
+                dp->params[j].value = value;
+                break;
+            }
+        }
+    }
+    return MIGRIS_DATAPOOL_OK;
 }
