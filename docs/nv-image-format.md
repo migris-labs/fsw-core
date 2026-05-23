@@ -12,11 +12,16 @@ breaking change to the layout requires bumping `format_version`.
 ## Geometry
 
 The store occupies **two flash sectors** of the board's
-`storage_partition`. On `nucleo_h753zi` that is the
-`storage_partition` defined in `boards/st/nucleo_h753zi/nucleo_h753zi.dts`
-(256 KB at flash offset `0xC0000` — exactly two of the STM32H7's
-128 KB sectors). The two sectors are used as an **A/B ping-pong** pair;
-the store keeps exactly one *image* per sector.
+`storage_partition`. On `nucleo_h753zi` the Zephyr v3.7.1 default DTS
+allocates only one 128 KB sector for `storage_partition` (the default
+partition table reserves the other slots for MCUboot, image-0/1 and
+image-scratch); a board overlay at
+[`samples/tc_uart/boards/nucleo_h753zi.overlay`](../samples/tc_uart/boards/nucleo_h753zi.overlay)
+replaces that table with a 256 KB `storage_partition` spanning the
+last two sectors of flash bank 1 (offsets `0xC0000` and `0xE0000`,
+absolute addresses `0x080C0000` and `0x080E0000`). The two sectors
+are used as an **A/B ping-pong** pair; the store keeps exactly one
+*image* per sector.
 
 ## A/B ping-pong
 

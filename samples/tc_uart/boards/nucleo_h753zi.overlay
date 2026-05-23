@@ -1,0 +1,27 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright 2026 Migris Labs
+ *
+ * Devicetree overlay for slice fsw-16: expand `storage_partition` from
+ * the Zephyr v3.7.1 default of one 128 KB sector to two 128 KB sectors
+ * (256 KB total) so `lib/nvstore/` has room for its power-safe A/B
+ * ping-pong. The two sectors land at the top of flash bank 1
+ * (offsets 0xC0000 and 0xE0000), reclaiming the default mcuboot /
+ * image-0 / image-1 / image-scratch slots — this sample does not use
+ * MCUboot or image slots, so dropping them is fine.
+ */
+
+&flash0 {
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		storage_partition: partition@c0000 {
+			label = "storage";
+			reg = <0x000c0000 DT_SIZE_K(256)>;
+		};
+	};
+};
