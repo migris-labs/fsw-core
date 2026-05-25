@@ -8,6 +8,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slice fsw-17: schedule, hkstore and mode persistence.** Three more
+  subsystems join the datapool on flash, completing the persistence
+  story slice fsw-16 opened. `lib/schedule/`, `lib/hkstore/` and
+  `lib/mode/` each gain a pure `serialize` / `deserialize` pair and a
+  `generation` counter bumped on every persisted mutation
+  (`insert`/`delete`/`reset`/`set_enabled`/`pop_due` for the schedule;
+  `create`/`delete`/`set_enabled` for the hkstore — explicitly not
+  `_due`, which only stamps the un-persisted `last_emit_sec`;
+  `_request` on a successful transition for the mode manager), and
+  `lib/nvstore/` claims three new record types: `SCHEDULE = 2`,
+  `HKSTORE = 3`, `MODE = 4`. The on-flash image header, encoding
+  rules and `MIGRIS_NVSTORE_FORMAT_VERSION` are unchanged — adding a
+  record type is non-breaking by the format's own rule — so old
+  firmware silently ignores the new records and new firmware degrades
+  to first-boot defaults on a record it doesn't find.
+  `MIGRIS_NVSTORE_PAYLOAD_MAX` bumps from 512 to 1536 B to fit a
+  worst-case full schedule (16 max-size TCs ≈ 1123 B). Per-record
+  byte layouts:
+  - `SCHEDULE`: `count(2 BE) + enabled(1) + { release_time(4 BE),
+    tc_len(2 BE), tc(tc_len) } * count`. Variable-length per entry so
+    the image stays proportional to actual scheduled volume.
+  - `HKSTORE`: `count(2 BE) + { sid(2 BE), interval_sec(4 BE),
+    enabled(1), param_count(1), param_ids(2 BE) * N } * count`. Only
+    in-use slots are written, packed back-to-back; `last_emit_sec` and
+    `in_use` are NOT serialised. Restored structures re-arm with
+    `last_emit_sec = 0` — otherwise the `(now - last_emit_sec) >=
+    interval_sec` arithmetic would underflow as `uint32_t` against a
+    fresh FSW clock and the structure would fire on every tick until
+    the clock caught up.
+  - `MODE`: `current(1)`. The mode set, allowed-target bitmasks and
+    optional event sink are code-defined every `init` and not
+    persisted; an unknown restored ID silently falls back to the
+    init-time current mode (firmware that shipped a new mode table
+    boots cleanly). Restore does NOT emit a `MODE_CHANGED` event
+    (boot restore is not a runtime transition) and does NOT bump
+    `generation`.
+  The `tc_uart` sample factors the per-subsystem auto-save into a
+  small `nv_autosave_tick` helper (one helper, four callers; the four
+  `last_saved_gen_*` snapshots stay inline next to the call site).
+  Boot-restore order is `datapool → schedule → hkstore → mode`; each
+  step silently skips when its record is absent so a first boot and
+  a partial-rollback boot both behave like first-boot for the missing
+  records. **The boot-time `BOOT → NOMINAL` demo transition is now
+  guarded on the post-restore current still being BOOT** — a
+  spacecraft persisted in SAFE (e.g. after the FDIR recovery slice
+  fsw-14 lands it there) outlives a reboot rather than being silently
+  undone. Operational notes:
+  - **Schedule entry-ID collisions across reboot.** A pre-fsw-17
+    reboot wiped the schedule; post-fsw-17 a restored entry can
+    collide with a freshly-inserted one (existing `ERR_DUPLICATE`).
+    Correct behaviour — ground sequence counts should be monotonic —
+    but worth flagging: ground tooling that re-creates structures on
+    every pass may need to swap to "create iff not in `[3,11]` report".
+  - **Hkstore SID collisions.** Same correct-behaviour-but-now-visible
+    story as schedule.
+  Host coverage: `tests/{schedule,hkstore,mode}_persistence_test.cpp`
+  cover round-trip / truncation / over-capacity / SID-floor /
+  duplicate-SID / unknown-mode-ID / generation-mutation-vs-restore.
+  Renode closed-loop: `tests/renode/test_tc_uart_hk.py` gains
+  `test_persistence_save_writes_all_four_records` — mutates schedule,
+  hkstore and mode, reads the on-flash bytes at `0x080C0000`, and
+  asserts all four record types (1/2/3/4) land in the image with
+  `format_version == 1` and `seq >= 2`. Same Renode 1.16.1
+  `machine Reset` constraint as fsw-16 — warm-reboot closed-loop is
+  not feasible (CPU stays debug-halted), so on-flash save is proved
+  here and load is proved host-side. The `docs/nv-image-format.md`
+  spec gains three new record-type rows and three body subsections.
 - **Slice fsw-16: non-volatile (flash-backed) parameter storage.**
   Operator-tuned parameters now survive a reboot — the framework's
   first persistence capability, the most-deferred dependency in the

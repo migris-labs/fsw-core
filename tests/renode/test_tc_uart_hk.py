@@ -841,36 +841,52 @@ def test_datapool_save_writes_a_valid_nvstore_image(tc_hk_running) -> None:  # n
         timeout=30.0,
     )
 
-    # 3. Read the storage_partition's first sector directly from
+    # 3. Read both sectors of the storage_partition directly from
     #    Renode's flash MappedMemory. The board overlay puts the
     #    partition at flash absolute 0x080C0000 (the last two 128 KB
     #    sectors of bank 1, allocated by samples/tc_uart/boards/
-    #    nucleo_h753zi.overlay). The first save targets the *empty*
-    #    sector and writes one image (header + payload + CRC + padding
-    #    to the 32-byte STM32H7 flash word) — well under 96 bytes.
-    storage_partition_base = 0x080C0000
-    read_len = 96
-    image = bytearray()
-    for off in range(read_len):
-        resp = mon.cmd(f"sysbus ReadByte {hex(storage_partition_base + off)}").strip()
-        image.append(int(resp, 16))
-    image = bytes(image)
+    #    nucleo_h753zi.overlay). Each save alternates between A/B
+    #    sectors, so after N saves the latest image lives in sector
+    #    (N mod 2) — read both and validate. fsw-17 added a boot-time
+    #    mode save, so on the tc_uart (hk) build save #1 is the mode
+    #    record (sector A, seq 1) and save #2 is the datapool set
+    #    under test (sector B, seq 2). 256 bytes per sector easily
+    #    covers a header + multi-record payload + CRC + padding.
+    sector_a_base = 0x080C0000
+    sector_b_base = 0x080E0000
+    read_len = 256
 
-    # 4. Verify the image header: magic, format_version, non-empty
-    #    payload, monotonic sequence number.
-    assert image[:4] == b"MNV1", f"bad magic: {image[:4]!r}"
-    assert int.from_bytes(image[4:6], "big") == 1  # format_version
-    seq = int.from_bytes(image[6:10], "big")
+    def read_sector(base: int) -> bytes:
+        buf = bytearray()
+        for off in range(read_len):
+            resp = mon.cmd(f"sysbus ReadByte {hex(base + off)}").strip()
+            buf.append(int(resp, 16))
+        return bytes(buf)
+
+    sectors = [read_sector(sector_a_base), read_sector(sector_b_base)]
+
+    # 4. Validate each candidate sector (magic, format_version,
+    #    payload length, CRC) and pick the valid one with the higher
+    #    seq.
+    best: tuple[int, bytes] | None = None
+    for sector in sectors:
+        if sector[:4] != b"MNV1":
+            continue
+        if int.from_bytes(sector[4:6], "big") != 1:
+            continue
+        seq_candidate = int.from_bytes(sector[6:10], "big")
+        plen = int.from_bytes(sector[10:12], "big")
+        if not (0 < plen <= 1536):
+            continue
+        crc_on_flash = int.from_bytes(sector[12 + plen : 12 + plen + 2], "big")
+        if crc_on_flash != crc16_ccitt_false(bytes(sector[: 12 + plen])):
+            continue
+        if best is None or seq_candidate > best[0]:
+            best = (seq_candidate, sector)
+    assert best is not None, "no valid nvstore image in either sector"
+    seq, image = best
     assert seq >= 1, f"seq should be >= 1 on the first save, got {seq}"
     payload_len = int.from_bytes(image[10:12], "big")
-    assert 0 < payload_len <= 64, f"unexpected payload_len {payload_len}"
-
-    # 5. Verify the CRC-16-CCITT-FALSE over header + payload matches.
-    crc_on_flash = int.from_bytes(image[12 + payload_len : 12 + payload_len + 2], "big")
-    crc_computed = crc16_ccitt_false(bytes(image[: 12 + payload_len]))
-    assert (
-        crc_on_flash == crc_computed
-    ), f"CRC mismatch: on-flash {crc_on_flash:#06x}, computed {crc_computed:#06x}"
 
     # 6. Decode the payload's record list, find the DATAPOOL record
     #    (type 1), and confirm the HK-period parameter's persisted
@@ -902,3 +918,190 @@ def test_datapool_save_writes_a_valid_nvstore_image(tc_hk_running) -> None:  # n
     assert found == sentinel, (
         f"on-flash HK_PERIOD_SEC: {found}, expected sentinel {sentinel}"
     )
+
+
+# --- slice fsw-17: schedule, hkstore and mode persistence -------------
+
+
+def test_persistence_save_writes_all_four_records(tc_hk_running) -> None:  # noqa: F811
+    """The slice fsw-17 closed loop on the *save* side: schedule,
+    hkstore and mode all join the datapool on flash. A PUS-11[4] insert
+    + [11,1] enable mutates the schedule, a PUS-3[1] create + [3,5]
+    enable mutates the hkstore, and the sample's boot ``BOOT → NOMINAL``
+    transition bumps the mode generation — together they exercise all
+    four record types in one save tick. After a settling PUS-17 ping
+    the on-flash image must hold records 1 (datapool), 2 (schedule),
+    3 (hkstore) and 4 (mode), each with sensible body bytes.
+    Combined with the host-side per-subsystem round-trip tests
+    (tests/{schedule,hkstore,mode}_persistence_test.cpp), this proves
+    the full save→flash→load chain for the three new subsystems
+    end-to-end. Same Renode constraint as the fsw-16 save test:
+    1.16.1's Cortex-M `machine Reset` leaves the CPU in a debug-halt
+    state no monitor command unhalts, so a true warm-reboot round-trip
+    is host-side; on-flash bytes are read directly here."""
+    mon, uart = tc_hk_running
+
+    # 1. Schedule mutation: insert one activity and enable the schedule.
+    #    The activity is a tiny PUS-17 ping; release time well in the
+    #    future so it does not fire and re-bump the generation during
+    #    the test.
+    embedded_ping = build_pus17_are_you_alive_tc(
+        ack_flags=0,
+        source_id=0x0FE0,
+        seq_count=0xA0,
+    )
+    insert = build_pus11_insert_tc(
+        activities=[(1_000_000, embedded_ping)],
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0FE1,
+        seq_count=0xA1,
+    )
+    uart.send(insert)
+    _collect(uart, lambda ts: _completion_success(ts, insert[:4]), timeout=30.0)
+
+    sched_enable = build_pus11_enable_tc(
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0FE2,
+        seq_count=0xA2,
+    )
+    uart.send(sched_enable)
+    _collect(uart, lambda ts: _completion_success(ts, sched_enable[:4]), timeout=30.0)
+
+    # 2. Hkstore mutation: create a new structure and enable it. SID and
+    #    parameter IDs match the existing dynamic-housekeeping test so
+    #    the wire shape is familiar. interval_sec is large enough that
+    #    the structure won't fire and re-bump generation via _due (which
+    #    doesn't bump anyway, but kept large for cleanliness).
+    hk_sid = 0x0110
+    create = build_pus3_create_structure_tc(
+        sid=hk_sid,
+        param_ids=[DP_PARAM_FW_VERSION, DP_PARAM_FW_BUILD_ID],
+        interval_sec=1_000_000,
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0FE3,
+        seq_count=0xA3,
+    )
+    uart.send(create)
+    _collect(uart, lambda ts: _completion_success(ts, create[:4]), timeout=30.0)
+
+    hk_enable = build_pus3_enable_structure_tc(
+        sid=hk_sid,
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0FE4,
+        seq_count=0xA4,
+    )
+    uart.send(hk_enable)
+    _collect(uart, lambda ts: _completion_success(ts, hk_enable[:4]), timeout=30.0)
+
+    # 3. Mode: the sample's boot transition already advanced the mode
+    #    generation to 1. No extra TC needed.
+
+    # 4. PUS-17 ping forces one more main-loop iteration after all the
+    #    above settles, guaranteeing the save tick runs with every
+    #    record's snapshot up to date.
+    ping_tc = build_pus17_are_you_alive_tc(
+        ack_flags=ACK_ACCEPTANCE,
+        source_id=0x0FE5,
+        seq_count=0xA5,
+    )
+    uart.send(ping_tc)
+    _collect(
+        uart,
+        lambda ts: next(
+            (t for t in ts if t.secondary.service_type == PUS_SERVICE_TEST), None
+        ),
+        timeout=30.0,
+    )
+
+    # 5. Read the storage_partition. Each save alternates between the
+    #    A/B sectors (sector 0 at 0x080C0000, sector 1 at 0x080E0000),
+    #    so after N saves the latest image lives in sector (N mod 2).
+    #    With four record types and several mutations this test fires
+    #    multiple saves — read both sectors, validate each header, and
+    #    pick the one with the higher sequence number. (The fsw-16
+    #    datapool test gets away with reading just sector 0 because it
+    #    fires exactly one save.) 256 bytes per sector easily covers a
+    #    multi-record image at the test's modest scheduled volume.
+    sector_a_base = 0x080C0000
+    sector_b_base = 0x080E0000
+    read_len = 256
+
+    def read_sector(base: int) -> bytes:
+        buf = bytearray()
+        for off in range(read_len):
+            resp = mon.cmd(f"sysbus ReadByte {hex(base + off)}").strip()
+            buf.append(int(resp, 16))
+        return bytes(buf)
+
+    sectors = [read_sector(sector_a_base), read_sector(sector_b_base)]
+
+    # 6. Header-validate each candidate sector, keep the valid one with
+    #    the higher seq.
+    best: tuple[int, bytes] | None = None  # (seq, image)
+    for sector in sectors:
+        if sector[:4] != b"MNV1":
+            continue
+        if int.from_bytes(sector[4:6], "big") != 1:
+            continue  # format_version mismatch
+        seq = int.from_bytes(sector[6:10], "big")
+        payload_len = int.from_bytes(sector[10:12], "big")
+        if not (0 < payload_len <= 1536):
+            continue
+        crc_on_flash = int.from_bytes(
+            sector[12 + payload_len : 12 + payload_len + 2], "big"
+        )
+        if crc_on_flash != crc16_ccitt_false(bytes(sector[: 12 + payload_len])):
+            continue
+        if best is None or seq > best[0]:
+            best = (seq, sector)
+    assert best is not None, "no valid nvstore image in either sector"
+    seq, image = best
+    # We fire at least 2 record-bearing saves (schedule + hkstore — the
+    # mode save lands too once the sample's BOOT→NOMINAL transition runs
+    # before the loop starts).
+    assert seq >= 2, f"seq should be >= 2 after multiple mutations, got {seq}"
+    payload_len = int.from_bytes(image[10:12], "big")
+
+    # 7. Walk the payload and collect every record present.
+    record_schedule = 2
+    record_hkstore = 3
+    record_mode = 4
+    payload = image[12 : 12 + payload_len]
+    records: dict[int, bytes] = {}
+    rec_pos = 0
+    while rec_pos < len(payload):
+        rec_type = payload[rec_pos]
+        rec_len = int.from_bytes(payload[rec_pos + 1 : rec_pos + 3], "big")
+        rec_body = bytes(payload[rec_pos + 3 : rec_pos + 3 + rec_len])
+        records[rec_type] = rec_body
+        rec_pos += 3 + rec_len
+
+    # The DATAPOOL record (type 1) is intentionally NOT asserted here:
+    # this test does not mutate the datapool, and the fsw-17 sample
+    # only persists a record once its generation has advanced past the
+    # post-init value. The datapool save side is covered by the
+    # fsw-16 test above, which sends a PUS-20[3] set first.
+    assert record_schedule in records, f"SCHEDULE record missing: types={list(records)}"
+    assert record_hkstore in records, f"HKSTORE record missing: types={list(records)}"
+    assert record_mode in records, f"MODE record missing: types={list(records)}"
+
+    # 8. Sanity-check each new record's body.
+    #    SCHEDULE: count(2 BE) + enabled(1) + entries. We inserted one
+    #    activity then enabled.
+    sched_body = records[record_schedule]
+    assert int.from_bytes(sched_body[0:2], "big") == 1
+    assert sched_body[2] == 1, f"schedule.enabled byte = {sched_body[2]}"
+
+    #    HKSTORE: count(2 BE) + per-structure {sid(2) + interval(4) +
+    #    enabled(1) + param_count(1) + ids(2*N)}. One structure, enabled.
+    hk_body = records[record_hkstore]
+    assert int.from_bytes(hk_body[0:2], "big") == 1
+    assert int.from_bytes(hk_body[2:4], "big") == hk_sid
+    assert hk_body[8] == 1, f"hkstore.enabled byte = {hk_body[8]}"
+    assert hk_body[9] == 2, f"hkstore.param_count = {hk_body[9]}"
+
+    #    MODE: one byte, the current mode ID. The boot transition lands
+    #    in NOMINAL = 1 in the sample's mode set.
+    mode_body = records[record_mode]
+    assert len(mode_body) == 1
+    assert mode_body[0] == 1, f"mode.current = {mode_body[0]} (expected NOMINAL=1)"

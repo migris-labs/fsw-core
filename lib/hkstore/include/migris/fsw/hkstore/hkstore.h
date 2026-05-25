@@ -31,11 +31,19 @@
  * (the 0x0001..0x00FF block is reserved for fsw-core framework
  * structures). migris_hkstore_create rejects a SID below that floor.
  *
- * RAM-only and volatile: the store is empty after every reboot.
- * Non-volatile persistence across reset is deferred to a future
- * non-volatile-storage capability. Capacity and the per-structure
- * parameter count are compile-time constants — freestanding, no malloc.
- * Freestanding C — no Zephyr, no stdlib.
+ * RAM at runtime, but the persisted set (SID, parameter list,
+ * interval and enabled flag of each defined structure) survives a
+ * reboot through lib/nvstore/ — slice fsw-17 gives the store a
+ * serialize / deserialize pair and a monotonic generation counter the
+ * application polls to detect a mutation since the last save. The
+ * ``last_emit_sec`` and ``in_use`` fields are deliberately NOT
+ * persisted: ``in_use`` is an array-slot artefact (deserialize
+ * compacts defined structures into the low slots), and persisting
+ * ``last_emit_sec`` against a fresh FSW clock would make the (now -
+ * last) due arithmetic underflow as uint32_t and the structure would
+ * fire on every tick until the clock caught up. Capacity and the
+ * per-structure parameter count are compile-time constants —
+ * freestanding, no malloc. Freestanding C — no Zephyr, no stdlib.
  *
  * Byte-level specification of the PUS-3 wire: docs/wire/pus-3.md.
  */
@@ -92,25 +100,34 @@ typedef struct {
     int in_use;             /**< 0 = free slot, 1 = a defined structure. */
 } migris_hk_structure_t;
 
-/** The housekeeping-structure store. Caller-owned, RAM-only and
- *  volatile — empty after a reboot. Zero-initialise once, then call
- *  ``migris_hkstore_init``. Slots are not compacted on delete, so a
- *  borrowed ``migris_hk_structure_t`` pointer stays valid across the
- *  creation or deletion of *other* structures. */
+/** The housekeeping-structure store. Caller-owned. Zero-initialise
+ *  once, then call ``migris_hkstore_init``. Slots are not compacted on
+ *  delete, so a borrowed ``migris_hk_structure_t`` pointer stays valid
+ *  across the creation or deletion of *other* structures.
+ *
+ *  ``generation`` is monotonically incremented on every successful
+ *  call that mutates the persisted set — create, delete, set_enabled.
+ *  The tc_uart sample polls it to detect a mutation since the last
+ *  save without re-reading every slot. The field is RAM-only: it
+ *  starts at 0 on every boot, is bumped by mutations, and is NOT
+ *  included in the on-flash serialised image. */
 typedef struct {
     migris_hk_structure_t structures[MIGRIS_HKSTORE_CAPACITY];
-    size_t count; /**< Number of defined (in-use) structures. */
+    size_t count;        /**< Number of defined (in-use) structures. */
+    uint32_t generation; /**< Mutation counter; slice fsw-17. */
 } migris_hkstore_t;
 
 /** Housekeeping-store return / error codes. Same convention as the
  *  rest of the framework: 0 is success, negative is one of these. */
 typedef enum {
     MIGRIS_HKSTORE_OK = 0,
-    MIGRIS_HKSTORE_ERR_BAD_ARG = -1,   /**< NULL pointer, empty list, or SID below 0x0100. */
-    MIGRIS_HKSTORE_ERR_FULL = -2,      /**< Store already at capacity. */
-    MIGRIS_HKSTORE_ERR_TOO_MANY = -3,  /**< Parameter list over MIGRIS_HKSTORE_MAX_PARAMS. */
-    MIGRIS_HKSTORE_ERR_DUPLICATE = -4, /**< A structure with this SID already exists. */
-    MIGRIS_HKSTORE_ERR_NOT_FOUND = -5  /**< No structure with this SID. */
+    MIGRIS_HKSTORE_ERR_BAD_ARG = -1,      /**< NULL pointer, empty list, or SID below 0x0100. */
+    MIGRIS_HKSTORE_ERR_FULL = -2,         /**< Store already at capacity. */
+    MIGRIS_HKSTORE_ERR_TOO_MANY = -3,     /**< Parameter list over MIGRIS_HKSTORE_MAX_PARAMS. */
+    MIGRIS_HKSTORE_ERR_DUPLICATE = -4,    /**< A structure with this SID already exists. */
+    MIGRIS_HKSTORE_ERR_NOT_FOUND = -5,    /**< No structure with this SID. */
+    MIGRIS_HKSTORE_ERR_TRUNCATED = -6,    /**< Deserialise: input shorter than declared image. */
+    MIGRIS_HKSTORE_ERR_BUF_TOO_SMALL = -7 /**< Serialise: output buffer below the image size. */
 } migris_hkstore_status_t;
 
 /** Reset ``store`` to empty. A zero-initialised ``migris_hkstore_t`` is
@@ -162,6 +179,46 @@ const migris_hk_structure_t* migris_hkstore_find(const migris_hkstore_t* store, 
  *  NULL argument. Call once per main-loop iteration — one structure is
  *  released per call. */
 const migris_hk_structure_t* migris_hkstore_due(migris_hkstore_t* store, uint32_t now_seconds);
+
+/** Mutation counter — strictly monotonic, bumped on every successful
+ *  ``migris_hkstore_create`` / ``_delete`` / ``_set_enabled``. NOT
+ *  bumped by ``migris_hkstore_due`` — ``last_emit_sec`` is not
+ *  persisted, so a due call does not change anything that lands on
+ *  flash. Lets the application save the store to NVM when it changes
+ *  without polling every slot. Returns 0 on a NULL store. Resets to
+ *  0 on every ``migris_hkstore_init`` (the field is NOT persisted —
+ *  a fresh boot starts at 0 even after a restored image). */
+uint32_t migris_hkstore_generation(const migris_hkstore_t* store);
+
+/** Serialise the in-use structures into ``out`` as a contiguous byte
+ *  stream for the ``lib/nvstore/`` persistence layer:
+ *
+ *      count(2 BE) + { sid(2 BE), interval_sec(4 BE), enabled(1),
+ *                      param_count(1), param_ids(2 BE) * N } * count
+ *
+ *  Only the in-use slots are written, packed back-to-back. The
+ *  ``last_emit_sec`` and ``in_use`` fields are deliberately NOT
+ *  serialised. Returns the positive byte count written, or a negative
+ *  ``migris_hkstore_status_t`` (``_ERR_BUF_TOO_SMALL`` /
+ *  ``_ERR_BAD_ARG``). The ``generation`` counter is RAM-only. */
+int migris_hkstore_serialize(const migris_hkstore_t* store, uint8_t* out, size_t out_cap);
+
+/** Restore in-use structures from a previously serialised image.
+ *  Each restored structure is compacted into the low slots (the
+ *  ``in_use`` flag is rebuilt; remaining slots are cleared). Every
+ *  restored structure starts with ``last_emit_sec = 0`` — periodic
+ *  emission re-arms from the current FSW clock rather than firing on
+ *  every tick until ``now`` catches up to a stale stamp. The
+ *  ``generation`` counter is NOT bumped (a restore is not a mutation).
+ *  On any error the store is reset to empty (stateless failure).
+ *  Returns ``MIGRIS_HKSTORE_OK`` on a complete decode, ``_ERR_BAD_ARG``
+ *  on a NULL argument, ``_ERR_TRUNCATED`` if the image is short of the
+ *  declared payload, ``_ERR_FULL`` if ``count`` exceeds
+ *  ``MIGRIS_HKSTORE_CAPACITY``, ``_ERR_TOO_MANY`` if any
+ *  ``param_count`` exceeds ``MIGRIS_HKSTORE_MAX_PARAMS``, or
+ *  ``_ERR_BAD_ARG`` if any restored SID is below
+ *  ``MIGRIS_HKSTORE_SID_MIN`` or duplicates one already restored. */
+int migris_hkstore_deserialize(migris_hkstore_t* store, const uint8_t* in, size_t in_len);
 
 #ifdef __cplusplus
 }  // extern "C"

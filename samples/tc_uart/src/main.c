@@ -123,6 +123,19 @@
  * existing PUS-20 set/report. On-flash image format is pinned in
  * docs/nv-image-format.md.
  *
+ * Slice fsw-17 extends that persistence to three more subsystems: the
+ * on-board schedule (PUS-11 activities + the enabled flag), the
+ * housekeeping-structure store (PUS-3 dynamic structure definitions),
+ * and the operating-mode manager (the current mode). Each owns a new
+ * nvstore record type (SCHEDULE = 2, HKSTORE = 3, MODE = 4) and a
+ * generation counter the loop's save tick polls through the shared
+ * `nv_autosave_tick` helper. A single `migris_nvstore_save` at the
+ * end of the tick coalesces any combination of advances into one
+ * flash write. The boot-time `BOOT → NOMINAL` demo transition is now
+ * gated on the post-restore current still being BOOT, so a
+ * spacecraft persisted in SAFE (by an FDIR recovery, say) outlives a
+ * reboot rather than being silently undone.
+ *
  * Single producer (the RX IRQ) and single consumer (main thread)
  * make ring_buf safe without explicit locking. We send TM with
  * blocking ``uart_poll_out`` — this slice has no concurrent TX
@@ -236,15 +249,79 @@ static migris_pktstore_t store;
  * RAM-only and volatile: empty after every reboot. */
 static migris_hkstore_t hkstore;
 
-/* Non-volatile parameter store (slice fsw-16). On boot, the datapool's
- * persisted values are restored from flash; in the main loop, a
- * successful PUS-20[3] set bumps the datapool's generation counter,
- * which triggers a single coalesced save to flash. File-scope because
- * the in-RAM payload buffer alone is ~512 B (too large for the main()
- * stack), and the backend keeps file-scope state of its own. */
+/* Non-volatile parameter store (slice fsw-16, extended in fsw-17). On
+ * boot, persisted records are restored from flash for the datapool,
+ * the schedule, the housekeeping-structure store and the operating-
+ * mode manager. In the main loop, each subsystem's generation counter
+ * is polled and any record whose generation advanced is re-serialised
+ * into the nvstore image; one coalesced flash save lands the new
+ * image at the end of the tick. File-scope because the in-RAM payload
+ * buffer alone is ~1.5 KB (too large for the main() stack), and the
+ * backend keeps file-scope state of its own. The per-subsystem
+ * scratch buffers are sized to each codec's worst case so the helper
+ * never has to truncate. */
 static migris_nvstore_t nvstore;
 static migris_nv_backend_t nv_backend;
-static uint8_t nv_buf[64]; /* the datapool record is ~20 B today; ample headroom. */
+static uint8_t nv_buf_dp[64];      /* datapool record is ~20 B today */
+static uint8_t nv_buf_sched[1200]; /* schedule worst case ≈ 3 + 16 * (4+2+TC_MAX) */
+static uint8_t nv_buf_hk[256];     /* hkstore worst case ≈ 2 + CAPACITY * (8 + 2*MAX_PARAMS) */
+static uint8_t nv_buf_mode[8];     /* mode record is exactly 1 byte */
+
+/* Serialiser signature shared by the four persisted subsystems —
+ * every subsystem's serialize matches it. Used by nv_autosave_tick to
+ * dispatch a per-record save without four near-identical copies of the
+ * "if generation advanced, serialise + put" block (cognitive
+ * complexity in main() would otherwise blow out — see CHANGELOG note
+ * on the fsw-17 helper). */
+typedef int (*nv_serialize_fn)(const void* obj, uint8_t* out, size_t out_cap);
+
+/* If `cur_gen` has advanced since `*last_saved_gen`, serialise `obj`
+ * into the nvstore image as `record_type` and update `*last_saved_gen`
+ * to `cur_gen`. Does NOT call migris_nvstore_save — the caller
+ * coalesces multiple put()s into one save per loop iteration. Returns
+ * non-zero iff a record was put (i.e. the image is dirty and needs a
+ * subsequent save). */
+static int nv_autosave_tick(uint8_t record_type,
+                            nv_serialize_fn serialize,
+                            const void* obj,
+                            uint32_t cur_gen,
+                            uint32_t* last_saved_gen,
+                            uint8_t* buf,
+                            size_t buf_cap) {
+    if (cur_gen == *last_saved_gen) {
+        return 0;
+    }
+    const int n = serialize(obj, buf, buf_cap);
+    if (n <= 0) {
+        return 0;
+    }
+    if (migris_nvstore_put(&nvstore, record_type, buf, (uint16_t)n) != MIGRIS_NVSTORE_OK) {
+        return 0;
+    }
+    *last_saved_gen = cur_gen;
+    return 1;
+}
+
+/* Adapter shims so the four C-typed serialisers match nv_serialize_fn
+ * exactly — pointer-to-typed-struct -> pointer-to-void is not
+ * implicit in C, and the strict-aliasing-safe casts live here in one
+ * place rather than at every call site. */
+static int nv_ser_datapool(const void* obj, uint8_t* out, size_t out_cap) {
+    return migris_datapool_serialize((const migris_datapool_t*)obj, out, out_cap);
+}
+
+static int nv_ser_schedule(const void* obj, uint8_t* out, size_t out_cap) {
+    return migris_schedule_serialize((const migris_schedule_t*)obj, out, out_cap);
+}
+
+static int nv_ser_hkstore(const void* obj, uint8_t* out, size_t out_cap) {
+    return migris_hkstore_serialize((const migris_hkstore_t*)obj, out, out_cap);
+}
+#ifdef CONFIG_FSW_MODE_DEMO
+static int nv_ser_mode(const void* obj, uint8_t* out, size_t out_cap) {
+    return migris_mode_serialize((const migris_mode_manager_t*)obj, out, out_cap);
+}
+#endif
 
 #ifdef CONFIG_FSW_LARGEDATA_DEMO
 /* On-board large-data downlink session (slice fsw-12). PUS-13 has no
@@ -389,16 +466,20 @@ int main(void) {
     (void)migris_datapool_init(&datapool, dp_params, sizeof(dp_params) / sizeof(dp_params[0]));
     ctx.datapool = &datapool;
 
-    /* Slice fsw-16: non-volatile parameter persistence. Open the
-     * board's storage_partition through the Zephyr flash backend,
-     * attach it to the nvstore, load any prior image and — if a
-     * DATAPOOL record is present — restore its values over the
-     * Kconfig defaults seeded above. Best-effort: a missing or
-     * corrupted image leaves the datapool at its defaults, exactly
-     * the first-boot behaviour. */
+    /* Slice fsw-16: open the board's storage_partition through the
+     * Zephyr flash backend and attach it to the nvstore. The actual
+     * restore for each persisted subsystem happens further down,
+     * after that subsystem is initialised — order matters and we want
+     * the load to land on a clean post-init state. */
     nv_backend = migris_fsw_nv_flash_backend();
     migris_nvstore_init(&nvstore, &nv_backend);
-    if (migris_nvstore_load(&nvstore) == MIGRIS_NVSTORE_OK) {
+    const int nv_load_rc = migris_nvstore_load(&nvstore);
+
+    /* Slice fsw-16 (extended in fsw-17): restore the datapool over
+     * the Kconfig defaults seeded above. Best-effort: a missing or
+     * corrupted image leaves the datapool at its defaults, exactly
+     * the first-boot behaviour. */
+    if (nv_load_rc == MIGRIS_NVSTORE_OK) {
         const uint8_t* dp_bytes = NULL;
         uint16_t dp_len = 0U;
         if (migris_nvstore_get(&nvstore, MIGRIS_NVSTORE_RECORD_DATAPOOL, &dp_bytes, &dp_len) ==
@@ -410,8 +491,20 @@ int main(void) {
     /* Slice fsw-10: the on-board schedule. A routed PUS-11 TC inserts
      * time-tagged telecommands; the release tick in the loop below
      * dispatches due ones. The schedule starts disabled — ground
-     * enables it with a PUS-11[1]. */
+     * enables it with a PUS-11[1]. fsw-17: the activities array and
+     * enabled flag are restored from the nvstore SCHEDULE record (if
+     * one was loaded), so a pass's worth of uploaded commands survives
+     * a reboot. */
     migris_schedule_init(&schedule);
+    if (nv_load_rc == MIGRIS_NVSTORE_OK) {
+        const uint8_t* sched_bytes = NULL;
+        uint16_t sched_len = 0U;
+        if (migris_nvstore_get(
+                &nvstore, MIGRIS_NVSTORE_RECORD_SCHEDULE, &sched_bytes, &sched_len) ==
+            MIGRIS_NVSTORE_OK) {
+            (void)migris_schedule_deserialize(&schedule, sched_bytes, sched_len);
+        }
+    }
     ctx.schedule = &schedule;
 
     /* Slice fsw-11: the on-board packet store. transmit_tm taps every
@@ -426,8 +519,20 @@ int main(void) {
      * PUS-3 structure-management TC creates / enables structures here;
      * the emission tick in the loop below turns an enabled, due
      * structure into a datapool-backed dynamic PUS-3[25] report. The
-     * store starts empty — ground defines structures with [3,1]. */
+     * store starts empty — ground defines structures with [3,1].
+     * fsw-17: defined structures and their enabled flags are restored
+     * from the nvstore HKSTORE record (if one was loaded); each
+     * restored structure re-arms from now so a long boot does not fire
+     * an immediate downlink burst. */
     migris_hkstore_init(&hkstore);
+    if (nv_load_rc == MIGRIS_NVSTORE_OK) {
+        const uint8_t* hk_bytes = NULL;
+        uint16_t hk_len = 0U;
+        if (migris_nvstore_get(&nvstore, MIGRIS_NVSTORE_RECORD_HKSTORE, &hk_bytes, &hk_len) ==
+            MIGRIS_NVSTORE_OK) {
+            (void)migris_hkstore_deserialize(&hkstore, hk_bytes, hk_len);
+        }
+    }
     ctx.hkstore = &hkstore;
 
 #ifdef CONFIG_FSW_LARGEDATA_DEMO
@@ -448,7 +553,10 @@ int main(void) {
      * no modes. BOOT may go to NOMINAL or SAFE; NOMINAL and SAFE may
      * swap. The FDIR sink carries the MODE_CHANGED event. The mode set
      * is a fixed, compile-time-correct constant, so the init cannot
-     * fail. */
+     * fail. fsw-17: the current mode is restored from the nvstore MODE
+     * record (if one was loaded); the boot transition further down is
+     * guarded on the post-restore current being BOOT, so a persisted
+     * SAFE outlives a reboot rather than being silently undone. */
     const migris_mode_def_t mode_defs[] = {
         {FSW_MODE_BOOT, (1U << FSW_MODE_NOMINAL) | (1U << FSW_MODE_SAFE)},
         {FSW_MODE_NOMINAL, 1U << FSW_MODE_SAFE},
@@ -456,6 +564,14 @@ int main(void) {
     };
     (void)migris_mode_init(
         &mode_mgr, mode_defs, sizeof(mode_defs) / sizeof(mode_defs[0]), FSW_MODE_BOOT, &fdir_sink);
+    if (nv_load_rc == MIGRIS_NVSTORE_OK) {
+        const uint8_t* mode_bytes = NULL;
+        uint16_t mode_len = 0U;
+        if (migris_nvstore_get(&nvstore, MIGRIS_NVSTORE_RECORD_MODE, &mode_bytes, &mode_len) ==
+            MIGRIS_NVSTORE_OK) {
+            (void)migris_mode_deserialize_current(&mode_mgr, mode_bytes, mode_len);
+        }
+    }
 #endif
 
 #ifdef CONFIG_FSW_FDIR_RECOVERY_DEMO
@@ -509,8 +625,15 @@ int main(void) {
     /* Slice fsw-13: the boot-time mode transition. Once the FSW is up,
      * leave BOOT for NOMINAL; the mode manager enqueues a PUS-5
      * MODE_CHANGED event through the FDIR sink, drained onto the wire
-     * by the loop's FDIR tick like any other event. */
-    (void)migris_mode_request(&mode_mgr, FSW_MODE_NOMINAL, boot_sec);
+     * by the loop's FDIR tick like any other event.
+     *
+     * fsw-17: gated on the post-restore current still being BOOT — if
+     * the nvstore restored a previously-persisted operational mode
+     * (NOMINAL, or SAFE after an FDIR recovery), reboot must leave the
+     * spacecraft in that mode rather than silently undoing it. */
+    if (migris_mode_current(&mode_mgr) == FSW_MODE_BOOT) {
+        (void)migris_mode_request(&mode_mgr, FSW_MODE_NOMINAL, boot_sec);
+    }
 #endif
 
     /* Slice fsw-7: spontaneous periodic PUS-3[25] housekeeping report.
@@ -529,15 +652,30 @@ int main(void) {
      * FIFO producer) reports the *delta* as an RX_OVERFLOW anomaly. */
     uint32_t last_reported_rx_drops = 0U;
 
-    /* Last datapool generation persisted to flash (slice fsw-16). The
-     * datapool bumps its generation counter on every successful
-     * `migris_datapool_set`; the loop's save tick below saves only when
-     * the current generation differs from this snapshot, so a batch of
-     * back-to-back sets coalesces into one flash write. Initialised to
-     * the post-load generation (0 if no image, 0 also if an image was
-     * loaded — deserialize is a restore, not a set, so it does not
-     * bump). */
-    uint32_t last_saved_gen = migris_datapool_generation(&datapool);
+    /* Per-subsystem snapshots of the generation already persisted to
+     * flash (slice fsw-16 for the datapool, fsw-17 for the others).
+     * Each subsystem bumps its generation on every persisted mutation;
+     * the loop's save tick below visits the four subsystems through
+     * `nv_autosave_tick`, puts the new bytes only for records that
+     * advanced, and issues at most one `migris_nvstore_save` per
+     * iteration — back-to-back mutations coalesce into one flash
+     * write.
+     *
+     * Initialised to **0** (not the post-restore generation): every
+     * subsystem's `init` / `deserialize` leaves `generation == 0`,
+     * and any runtime mutation that bumps it past 0 is a change we
+     * want persisted. This matters for the boot-time mode transition
+     * above — the BOOT→NOMINAL request bumps mode.generation to 1
+     * *before* we get here, and we want that initial NOMINAL to land
+     * on flash (otherwise a first-boot crash would resurrect BOOT on
+     * the next start). Initialising the snapshot to the post-boot
+     * generation would miss that save. */
+    uint32_t last_saved_gen_dp = 0U;
+    uint32_t last_saved_gen_sched = 0U;
+    uint32_t last_saved_gen_hk = 0U;
+#ifdef CONFIG_FSW_MODE_DEMO
+    uint32_t last_saved_gen_mode = 0U;
+#endif
 
     for (;;) {
         /* One FSW-clock read per iteration, reused by the periodic
@@ -546,24 +684,50 @@ int main(void) {
          * this read — coarse seconds are unaffected). */
         const uint32_t now_sec = (uint32_t)(k_uptime_get() / 1000);
 
-        /* Non-volatile save tick (slice fsw-16). The datapool bumps
-         * its generation counter on every successful set; if it has
-         * advanced since the last save, persist the new values now —
-         * one flash write per batch of changes, ahead of any other
-         * tick so the on-flash image always reflects state ground has
-         * already seen a PUS-1 completion for. The save is best-effort:
-         * a backend failure leaves `last_saved_gen` unchanged so the
-         * next iteration retries. */
-        const uint32_t cur_gen = migris_datapool_generation(&datapool);
-        if (cur_gen != last_saved_gen) {
-            const int dp_n = migris_datapool_serialize(&datapool, nv_buf, sizeof(nv_buf));
-            if (dp_n > 0 &&
-                migris_nvstore_put(
-                    &nvstore, MIGRIS_NVSTORE_RECORD_DATAPOOL, nv_buf, (uint16_t)dp_n) ==
-                    MIGRIS_NVSTORE_OK &&
-                migris_nvstore_save(&nvstore) == MIGRIS_NVSTORE_OK) {
-                last_saved_gen = cur_gen;
-            }
+        /* Non-volatile save tick (slice fsw-16, extended in fsw-17).
+         * Each persisted subsystem bumps its generation counter on
+         * every mutation; the helper puts the new record into the
+         * in-RAM nvstore image only for records whose generation has
+         * advanced since the last save. A single flash write at the
+         * end of the tick coalesces multiple subsystem changes from
+         * the same iteration. Ahead of every other tick so the
+         * on-flash image always reflects state ground has already
+         * seen a PUS-1 completion for. The save is best-effort: a
+         * backend failure leaves the `last_saved_gen_*` snapshots
+         * unchanged so the next iteration retries. */
+        int nv_dirty = 0;
+        nv_dirty |= nv_autosave_tick(MIGRIS_NVSTORE_RECORD_DATAPOOL,
+                                     nv_ser_datapool,
+                                     &datapool,
+                                     migris_datapool_generation(&datapool),
+                                     &last_saved_gen_dp,
+                                     nv_buf_dp,
+                                     sizeof(nv_buf_dp));
+        nv_dirty |= nv_autosave_tick(MIGRIS_NVSTORE_RECORD_SCHEDULE,
+                                     nv_ser_schedule,
+                                     &schedule,
+                                     migris_schedule_generation(&schedule),
+                                     &last_saved_gen_sched,
+                                     nv_buf_sched,
+                                     sizeof(nv_buf_sched));
+        nv_dirty |= nv_autosave_tick(MIGRIS_NVSTORE_RECORD_HKSTORE,
+                                     nv_ser_hkstore,
+                                     &hkstore,
+                                     migris_hkstore_generation(&hkstore),
+                                     &last_saved_gen_hk,
+                                     nv_buf_hk,
+                                     sizeof(nv_buf_hk));
+#ifdef CONFIG_FSW_MODE_DEMO
+        nv_dirty |= nv_autosave_tick(MIGRIS_NVSTORE_RECORD_MODE,
+                                     nv_ser_mode,
+                                     &mode_mgr,
+                                     migris_mode_generation(&mode_mgr),
+                                     &last_saved_gen_mode,
+                                     nv_buf_mode,
+                                     sizeof(nv_buf_mode));
+#endif
+        if (nv_dirty != 0) {
+            (void)migris_nvstore_save(&nvstore);
         }
 
         /* Spontaneous periodic housekeeping (slice fsw-7). Checked

@@ -21,11 +21,14 @@
 namespace migris::fsw::nvstore::test {
 namespace {
 
-// Two 1 KB sectors backed by plain RAM — enough room for the maximum
-// image (header 12 + payload 512 + CRC 2 + padding to write_block) and
-// still cheap. write_block mirrors the STM32H7's 32-byte flash word so
-// host tests respect the same alignment a real backend will enforce.
-constexpr std::uint32_t test_sector_size = 1024U;
+// Two 2 KB sectors backed by plain RAM — enough room for the maximum
+// image (header 12 + payload 1536 + CRC 2 + padding to write_block)
+// and still cheap. The fsw-17 PAYLOAD_MAX bump (512 → 1536) drove the
+// 1 KB → 2 KB sector growth; the STM32H7's real sectors are 128 KB so
+// the production backend is unaffected. write_block mirrors the
+// STM32H7's 32-byte flash word so host tests respect the same
+// alignment a real backend will enforce.
+constexpr std::uint32_t test_sector_size = 2048U;
 constexpr std::uint32_t test_sector_count = 2U;
 constexpr std::uint32_t test_write_block = 32U;
 

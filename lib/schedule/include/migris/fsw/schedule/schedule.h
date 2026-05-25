@@ -27,11 +27,11 @@
  * It starts DISABLED — flight-safe: a freshly booted FSW does not
  * autonomously fire a stale schedule until ground enables it.
  *
- * RAM-only and volatile: the schedule is empty after every reboot.
- * Non-volatile persistence across reset is deferred to a future
- * non-volatile-storage capability (a flash storage subsystem — the
- * PUS-15 packet store, lib/pktstore/, is itself RAM-backed and does
- * not provide it). Capacity and the per-activity TC size are
+ * RAM at runtime, but the persisted set (the activities array and the
+ * enabled flag) survives a reboot through lib/nvstore/ — slice fsw-17
+ * gives the schedule a serialize / deserialize pair and a monotonic
+ * generation counter that the application polls to detect a mutation
+ * since the last save. Capacity and the per-activity TC size are
  * compile-time constants — freestanding, no malloc. Freestanding C —
  * no Zephyr, no stdlib.
  *
@@ -78,14 +78,22 @@ typedef struct {
     size_t tc_len;                      /**< Telecommand length in bytes. */
 } migris_schedule_activity_t;
 
-/** The schedule. Caller-owned, RAM-only and volatile — empty after a
- *  reboot. Zero-initialise once, then call ``migris_schedule_init``.
- *  Activities are unordered; release order is decided per tick by
- *  ``migris_schedule_pop_due`` (earliest release time first). */
+/** The schedule. Caller-owned. Zero-initialise once, then call
+ *  ``migris_schedule_init``. Activities are unordered; release order
+ *  is decided per tick by ``migris_schedule_pop_due`` (earliest
+ *  release time first).
+ *
+ *  ``generation`` is monotonically incremented on every successful
+ *  call that mutates the persisted set — insert, delete, reset,
+ *  set_enabled and pop_due. The tc_uart sample polls it to detect a
+ *  mutation since the last save without re-reading the array. The
+ *  field is RAM-only: it starts at 0 on every boot, is bumped by
+ *  mutations, and is NOT included in the on-flash serialised image. */
 typedef struct {
     migris_schedule_activity_t activities[MIGRIS_SCHEDULE_CAPACITY];
     size_t count;
-    int enabled; /**< 0 = disabled (the post-init default), 1 = enabled. */
+    int enabled;         /**< 0 = disabled (the post-init default), 1 = enabled. */
+    uint32_t generation; /**< Mutation counter; slice fsw-17. */
 } migris_schedule_t;
 
 /** Schedule return / error codes. Same convention as the rest of the
@@ -93,12 +101,13 @@ typedef struct {
  *  these. */
 typedef enum {
     MIGRIS_SCHEDULE_OK = 0,
-    MIGRIS_SCHEDULE_ERR_BAD_ARG = -1,      /**< NULL pointer, or short request ID. */
-    MIGRIS_SCHEDULE_ERR_FULL = -2,         /**< Schedule already at capacity. */
-    MIGRIS_SCHEDULE_ERR_TC_TOO_LARGE = -3, /**< TC longer than MIGRIS_SCHEDULE_TC_MAX. */
-    MIGRIS_SCHEDULE_ERR_DUPLICATE = -4,    /**< Request identifier already scheduled. */
-    MIGRIS_SCHEDULE_ERR_NOT_FOUND = -5,    /**< Request identifier not in the schedule. */
-    MIGRIS_SCHEDULE_ERR_BUF_TOO_SMALL = -6 /**< Output buffer below the due TC's length. */
+    MIGRIS_SCHEDULE_ERR_BAD_ARG = -1,       /**< NULL pointer, or short request ID. */
+    MIGRIS_SCHEDULE_ERR_FULL = -2,          /**< Schedule already at capacity. */
+    MIGRIS_SCHEDULE_ERR_TC_TOO_LARGE = -3,  /**< TC longer than MIGRIS_SCHEDULE_TC_MAX. */
+    MIGRIS_SCHEDULE_ERR_DUPLICATE = -4,     /**< Request identifier already scheduled. */
+    MIGRIS_SCHEDULE_ERR_NOT_FOUND = -5,     /**< Request identifier not in the schedule. */
+    MIGRIS_SCHEDULE_ERR_BUF_TOO_SMALL = -6, /**< Output buffer below the due TC's length. */
+    MIGRIS_SCHEDULE_ERR_TRUNCATED = -7 /**< Deserialise: input shorter than the declared image. */
 } migris_schedule_status_t;
 
 /** Reset ``sched`` to empty and DISABLED. A zero-initialised
@@ -160,6 +169,40 @@ int migris_schedule_pop_due(migris_schedule_t* sched,
                             uint8_t* out_tc,
                             size_t out_cap,
                             size_t* out_len);
+
+/** Mutation counter — strictly monotonic, bumped on every successful
+ *  ``migris_schedule_insert`` / ``_delete`` / ``_reset`` /
+ *  ``_set_enabled`` / ``_pop_due``. Lets the application save the
+ *  schedule to NVM when it changes without polling each activity.
+ *  Returns 0 on a NULL store. Resets to 0 on every
+ *  ``migris_schedule_init`` (the field is NOT persisted — a fresh boot
+ *  starts at 0 even after a restored image). */
+uint32_t migris_schedule_generation(const migris_schedule_t* sched);
+
+/** Serialise the schedule into ``out`` as a contiguous byte stream for
+ *  the ``lib/nvstore/`` persistence layer:
+ *
+ *      count(2 BE) + enabled(1) + { release_time(4 BE), tc_len(2 BE),
+ *                                   tc(tc_len) } * count
+ *
+ *  Variable-length per-entry so the image stays proportional to actual
+ *  scheduled volume. Returns the positive byte count written, or a
+ *  negative ``migris_schedule_status_t`` (``_ERR_BUF_TOO_SMALL`` /
+ *  ``_ERR_BAD_ARG``). The ``generation`` counter is NOT serialised. */
+int migris_schedule_serialize(const migris_schedule_t* sched, uint8_t* out, size_t out_cap);
+
+/** Restore the schedule from a previously serialised image. Replaces
+ *  the current ``activities``, ``count`` and ``enabled``. The
+ *  ``generation`` counter is NOT bumped (a restore is not a mutation —
+ *  the sample's "have I changed since the last save?" loop must not
+ *  double-save on every boot). On any error the schedule is reset to
+ *  empty + disabled (stateless failure). Returns
+ *  ``MIGRIS_SCHEDULE_OK`` on a complete decode, ``_ERR_BAD_ARG`` on a
+ *  NULL argument, ``_ERR_TRUNCATED`` if the image is short of the
+ *  declared payload, ``_ERR_FULL`` if ``count`` exceeds
+ *  ``MIGRIS_SCHEDULE_CAPACITY``, or ``_ERR_TC_TOO_LARGE`` if any
+ *  per-entry ``tc_len`` exceeds ``MIGRIS_SCHEDULE_TC_MAX``. */
+int migris_schedule_deserialize(migris_schedule_t* sched, const uint8_t* in, size_t in_len);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -51,12 +51,14 @@ extern "C" {
 /** Maximum bytes the in-RAM payload (the full set of records being
  *  saved/loaded) may hold. Compile-time constant so the store is
  *  statically sized (freestanding, no malloc). Override with
- *  ``-DMIGRIS_NVSTORE_PAYLOAD_MAX=<n>``. The default leaves comfortable
- *  room for the datapool (the fsw-16 first consumer) plus the schedule
- *  / hkstore / mode records of later slices; the underlying flash
- *  sector is far larger (128 KB on the STM32H7). */
+ *  ``-DMIGRIS_NVSTORE_PAYLOAD_MAX=<n>``. The default sizes for the
+ *  current set of records — datapool (fsw-16) plus the schedule,
+ *  hkstore and mode records added in fsw-17. Worst-case at the
+ *  fsw-17 defaults is ≈ 1330 B (a full schedule of 16 max-sized TCs
+ *  dominates); 1536 leaves comfortable headroom without straying
+ *  outside the flash sector (128 KB on the STM32H7). */
 #ifndef MIGRIS_NVSTORE_PAYLOAD_MAX
-#    define MIGRIS_NVSTORE_PAYLOAD_MAX 512U
+#    define MIGRIS_NVSTORE_PAYLOAD_MAX 1536U
 #endif
 
 /** Format-version of the on-flash image. A `load` of an image with a
@@ -77,7 +79,9 @@ extern "C" {
  *  high block (0x80..0xFF) if it needs its own NV records. */
 typedef enum {
     MIGRIS_NVSTORE_RECORD_DATAPOOL = 1, /**< slice fsw-16. */
-    /* MIGRIS_NVSTORE_RECORD_SCHEDULE = 2, ... — future slices. */
+    MIGRIS_NVSTORE_RECORD_SCHEDULE = 2, /**< slice fsw-17. */
+    MIGRIS_NVSTORE_RECORD_HKSTORE = 3,  /**< slice fsw-17. */
+    MIGRIS_NVSTORE_RECORD_MODE = 4,     /**< slice fsw-17. */
 } migris_nvstore_record_type_t;
 
 /** The flash-I/O seam. Caller-owned vtable + opaque self. All calls

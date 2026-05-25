@@ -78,6 +78,7 @@ int migris_mode_init(migris_mode_manager_t* mgr,
     mgr->count = 0U;
     mgr->current = 0U;
     mgr->sink = NULL;
+    mgr->generation = 0U;
     if (n > MIGRIS_MODE_CAPACITY) {
         return MIGRIS_MODE_ERR_CAPACITY;
     }
@@ -128,6 +129,7 @@ int migris_mode_request(migris_mode_manager_t* mgr, migris_mode_id_t target, uin
 
     const migris_mode_id_t from = mgr->current;
     mgr->current = target;
+    mgr->generation++;
 
     /* Announce the change as a spontaneous PUS-5 informative event:
      * aux is the previous mode ID then the new one. */
@@ -140,5 +142,47 @@ int migris_mode_request(migris_mode_manager_t* mgr, migris_mode_id_t target, uin
                                 aux,
                                 sizeof aux);
     }
+    return MIGRIS_MODE_OK;
+}
+
+uint32_t migris_mode_generation(const migris_mode_manager_t* mgr) {
+    return (mgr == NULL) ? 0U : mgr->generation;
+}
+
+/* --- Serialisation (slice fsw-17) -------------------------------- */
+
+/* Layout: current(1). The declared mode set, allowed targets, and the
+ * optional event sink are NOT persisted — they are code-defined at
+ * every init. The generation counter is RAM-only. */
+int migris_mode_serialize(const migris_mode_manager_t* mgr, uint8_t* out, size_t out_cap) {
+    if (mgr == NULL || out == NULL) {
+        return MIGRIS_MODE_ERR_BAD_ARG;
+    }
+    if (out_cap < 1U) {
+        return MIGRIS_MODE_ERR_BUF_TOO_SMALL;
+    }
+    out[0] = (uint8_t)mgr->current;
+    return 1;
+}
+
+int migris_mode_deserialize_current(migris_mode_manager_t* mgr, const uint8_t* in, size_t in_len) {
+    if (mgr == NULL || in == NULL) {
+        return MIGRIS_MODE_ERR_BAD_ARG;
+    }
+    if (in_len < 1U) {
+        return MIGRIS_MODE_ERR_TRUNCATED;
+    }
+    const migris_mode_id_t restored = (migris_mode_id_t)in[0];
+    if (restored >= (migris_mode_id_t)MIGRIS_MODE_ID_MAX) {
+        return MIGRIS_MODE_OK; /* Out-of-range — silently keep the init-time current. */
+    }
+    if (mode_index_of(mgr->defs, mgr->count, restored) < 0) {
+        return MIGRIS_MODE_OK; /* Unknown to the current table — silently keep the init-time
+                                  current. */
+    }
+    /* No MODE_CHANGED event: boot restore is not a runtime transition,
+     * and the generation counter is intentionally not bumped (a
+     * restore is not a mutation). */
+    mgr->current = restored;
     return MIGRIS_MODE_OK;
 }
