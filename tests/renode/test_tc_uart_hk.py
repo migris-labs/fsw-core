@@ -841,36 +841,52 @@ def test_datapool_save_writes_a_valid_nvstore_image(tc_hk_running) -> None:  # n
         timeout=30.0,
     )
 
-    # 3. Read the storage_partition's first sector directly from
+    # 3. Read both sectors of the storage_partition directly from
     #    Renode's flash MappedMemory. The board overlay puts the
     #    partition at flash absolute 0x080C0000 (the last two 128 KB
     #    sectors of bank 1, allocated by samples/tc_uart/boards/
-    #    nucleo_h753zi.overlay). The first save targets the *empty*
-    #    sector and writes one image (header + payload + CRC + padding
-    #    to the 32-byte STM32H7 flash word) — well under 96 bytes.
-    storage_partition_base = 0x080C0000
-    read_len = 96
-    image = bytearray()
-    for off in range(read_len):
-        resp = mon.cmd(f"sysbus ReadByte {hex(storage_partition_base + off)}").strip()
-        image.append(int(resp, 16))
-    image = bytes(image)
+    #    nucleo_h753zi.overlay). Each save alternates between A/B
+    #    sectors, so after N saves the latest image lives in sector
+    #    (N mod 2) — read both and validate. fsw-17 added a boot-time
+    #    mode save, so on the tc_uart (hk) build save #1 is the mode
+    #    record (sector A, seq 1) and save #2 is the datapool set
+    #    under test (sector B, seq 2). 256 bytes per sector easily
+    #    covers a header + multi-record payload + CRC + padding.
+    sector_a_base = 0x080C0000
+    sector_b_base = 0x080E0000
+    read_len = 256
 
-    # 4. Verify the image header: magic, format_version, non-empty
-    #    payload, monotonic sequence number.
-    assert image[:4] == b"MNV1", f"bad magic: {image[:4]!r}"
-    assert int.from_bytes(image[4:6], "big") == 1  # format_version
-    seq = int.from_bytes(image[6:10], "big")
+    def read_sector(base: int) -> bytes:
+        buf = bytearray()
+        for off in range(read_len):
+            resp = mon.cmd(f"sysbus ReadByte {hex(base + off)}").strip()
+            buf.append(int(resp, 16))
+        return bytes(buf)
+
+    sectors = [read_sector(sector_a_base), read_sector(sector_b_base)]
+
+    # 4. Validate each candidate sector (magic, format_version,
+    #    payload length, CRC) and pick the valid one with the higher
+    #    seq.
+    best: tuple[int, bytes] | None = None
+    for sector in sectors:
+        if sector[:4] != b"MNV1":
+            continue
+        if int.from_bytes(sector[4:6], "big") != 1:
+            continue
+        seq_candidate = int.from_bytes(sector[6:10], "big")
+        plen = int.from_bytes(sector[10:12], "big")
+        if not (0 < plen <= 1536):
+            continue
+        crc_on_flash = int.from_bytes(sector[12 + plen : 12 + plen + 2], "big")
+        if crc_on_flash != crc16_ccitt_false(bytes(sector[: 12 + plen])):
+            continue
+        if best is None or seq_candidate > best[0]:
+            best = (seq_candidate, sector)
+    assert best is not None, "no valid nvstore image in either sector"
+    seq, image = best
     assert seq >= 1, f"seq should be >= 1 on the first save, got {seq}"
     payload_len = int.from_bytes(image[10:12], "big")
-    assert 0 < payload_len <= 64, f"unexpected payload_len {payload_len}"
-
-    # 5. Verify the CRC-16-CCITT-FALSE over header + payload matches.
-    crc_on_flash = int.from_bytes(image[12 + payload_len : 12 + payload_len + 2], "big")
-    crc_computed = crc16_ccitt_false(bytes(image[: 12 + payload_len]))
-    assert (
-        crc_on_flash == crc_computed
-    ), f"CRC mismatch: on-flash {crc_on_flash:#06x}, computed {crc_computed:#06x}"
 
     # 6. Decode the payload's record list, find the DATAPOOL record
     #    (type 1), and confirm the HK-period parameter's persisted
