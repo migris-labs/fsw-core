@@ -22,7 +22,10 @@ add_executable(
   pktstore_test.cpp
   largedata_test.cpp
   mode_test.cpp
-  nvstore_test.cpp)
+  nvstore_test.cpp
+  schedule_persistence_test.cpp
+  hkstore_persistence_test.cpp
+  mode_persistence_test.cpp)
 
 target_link_libraries(fsw-core-tests PRIVATE migris::fsw-core GTest::gtest GTest::gtest_main)
 

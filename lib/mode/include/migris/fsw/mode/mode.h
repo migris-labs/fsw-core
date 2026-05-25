@@ -34,6 +34,17 @@
  * Freestanding C — no Zephyr, no malloc, no stdlib. A successful
  * transition is announced through the lib/fsw event-sink seam as a
  * PUS-5 MODE_CHANGED event; wire format: docs/wire/pus-5.md.
+ *
+ * The mode table (its IDs and allowed transitions) is code-defined
+ * at every ``migris_mode_init`` and not persisted — a stale on-flash
+ * table would outlive a firmware change to the rules. Only the
+ * **current mode** survives a reboot, restored by lib/nvstore/ —
+ * slice fsw-17 gives the manager a one-byte serialise / current-only
+ * deserialise pair and a generation counter bumped on every
+ * successful transition. The deserialise does NOT emit MODE_CHANGED
+ * (a boot restore is not a runtime transition) and silently keeps
+ * the init-time current mode if the restored ID is unknown to the
+ * declared set.
  */
 
 #ifndef MIGRIS_FSW_MODE_MODE_H_
@@ -81,19 +92,29 @@ typedef struct {
  *  success, a negative value is one of these. */
 typedef enum {
     MIGRIS_MODE_OK = 0,
-    MIGRIS_MODE_ERR_BAD_ARG = -1,   /**< NULL pointer argument. */
-    MIGRIS_MODE_ERR_CAPACITY = -2,  /**< More modes than MIGRIS_MODE_CAPACITY. */
-    MIGRIS_MODE_ERR_DUPLICATE = -3, /**< Repeated mode ID in the init set. */
-    MIGRIS_MODE_ERR_RANGE = -4,     /**< Mode ID >= MIGRIS_MODE_ID_MAX, or a target
-                                         bit naming an undeclared mode. */
-    MIGRIS_MODE_ERR_NOT_FOUND = -5, /**< Initial / requested mode not declared. */
-    MIGRIS_MODE_ERR_FORBIDDEN = -6  /**< Requested transition not in the rules. */
+    MIGRIS_MODE_ERR_BAD_ARG = -1,       /**< NULL pointer argument. */
+    MIGRIS_MODE_ERR_CAPACITY = -2,      /**< More modes than MIGRIS_MODE_CAPACITY. */
+    MIGRIS_MODE_ERR_DUPLICATE = -3,     /**< Repeated mode ID in the init set. */
+    MIGRIS_MODE_ERR_RANGE = -4,         /**< Mode ID >= MIGRIS_MODE_ID_MAX, or a target
+                                             bit naming an undeclared mode. */
+    MIGRIS_MODE_ERR_NOT_FOUND = -5,     /**< Initial / requested mode not declared. */
+    MIGRIS_MODE_ERR_FORBIDDEN = -6,     /**< Requested transition not in the rules. */
+    MIGRIS_MODE_ERR_BUF_TOO_SMALL = -7, /**< Serialise: output buffer below the image size. */
+    MIGRIS_MODE_ERR_TRUNCATED = -8      /**< Deserialise: input shorter than the image. */
 } migris_mode_status_t;
 
-/** The mode manager. Caller-owned, RAM-only and volatile — the current
- *  mode resets to the initial mode whenever ``migris_mode_init`` runs
- *  (on every reboot). Zero-initialise once, then call
- *  ``migris_mode_init``. */
+/** The mode manager. Caller-owned. Zero-initialise once, then call
+ *  ``migris_mode_init``. ``current`` survives a reboot through
+ *  lib/nvstore/ (slice fsw-17, ``migris_mode_serialize`` /
+ *  ``_deserialize_current``); the declared mode set and ``sink`` are
+ *  code-defined every init and not persisted.
+ *
+ *  ``generation`` is monotonically incremented on every successful
+ *  ``migris_mode_request``. The tc_uart sample polls it to detect a
+ *  mode change since the last save without re-reading ``current``.
+ *  The field is RAM-only: it starts at 0 on every boot, is bumped by
+ *  successful transitions, and is NOT included in the on-flash
+ *  serialised image. */
 typedef struct {
     migris_mode_def_t defs[MIGRIS_MODE_CAPACITY];
     size_t count;
@@ -102,6 +123,7 @@ typedef struct {
      *  announced as a PUS-5 MODE_CHANGED event through it. NULL — the
      *  zero-initialised default — means no announcement. */
     const migris_event_sink_t* sink;
+    uint32_t generation; /**< Mutation counter; slice fsw-17. */
 } migris_mode_manager_t;
 
 /** Initialise ``mgr`` with ``n`` mode definitions copied from
@@ -139,6 +161,31 @@ int migris_mode_is_allowed(const migris_mode_manager_t* mgr, migris_mode_id_t ta
  *  ``MIGRIS_MODE_ERR_FORBIDDEN`` if the transition is not in the
  *  rules. */
 int migris_mode_request(migris_mode_manager_t* mgr, migris_mode_id_t target, uint32_t now_seconds);
+
+/** Mutation counter — strictly monotonic, bumped on every successful
+ *  ``migris_mode_request``. Returns 0 on a NULL manager. Resets to 0
+ *  on every ``migris_mode_init`` (the field is NOT persisted — a
+ *  fresh boot starts at 0 even after a restored image). */
+uint32_t migris_mode_generation(const migris_mode_manager_t* mgr);
+
+/** Serialise the persistable mode state — one byte, the current mode
+ *  ID — into ``out`` for the ``lib/nvstore/`` persistence layer. The
+ *  declared mode set is NOT persisted (it is code-defined at every
+ *  init), nor is the optional ``sink`` (function pointer). Returns
+ *  the positive byte count written (always 1), or a negative
+ *  ``migris_mode_status_t`` (``_ERR_BUF_TOO_SMALL`` / ``_ERR_BAD_ARG``). */
+int migris_mode_serialize(const migris_mode_manager_t* mgr, uint8_t* out, size_t out_cap);
+
+/** Restore the current mode from a previously serialised image. The
+ *  restored ID is validated against the declared mode set; if it is
+ *  unknown (firmware shipped a new table and dropped the old mode),
+ *  the init-time current mode is silently kept and ``MIGRIS_MODE_OK``
+ *  is still returned (rollback is non-fatal — the spacecraft must
+ *  boot). The ``generation`` counter is NOT bumped, no MODE_CHANGED
+ *  event is emitted: a boot restore is not a runtime transition.
+ *  Returns ``MIGRIS_MODE_OK`` on success, ``_ERR_BAD_ARG`` on a NULL
+ *  argument, or ``_ERR_TRUNCATED`` if the image is empty. */
+int migris_mode_deserialize_current(migris_mode_manager_t* mgr, const uint8_t* in, size_t in_len);
 
 #ifdef __cplusplus
 }  // extern "C"

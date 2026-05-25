@@ -902,3 +902,169 @@ def test_datapool_save_writes_a_valid_nvstore_image(tc_hk_running) -> None:  # n
     assert found == sentinel, (
         f"on-flash HK_PERIOD_SEC: {found}, expected sentinel {sentinel}"
     )
+
+
+# --- slice fsw-17: schedule, hkstore and mode persistence -------------
+
+
+def test_persistence_save_writes_all_four_records(tc_hk_running) -> None:  # noqa: F811
+    """The slice fsw-17 closed loop on the *save* side: schedule,
+    hkstore and mode all join the datapool on flash. A PUS-11[4] insert
+    + [11,1] enable mutates the schedule, a PUS-3[1] create + [3,5]
+    enable mutates the hkstore, and the sample's boot ``BOOT → NOMINAL``
+    transition bumps the mode generation — together they exercise all
+    four record types in one save tick. After a settling PUS-17 ping
+    the on-flash image must hold records 1 (datapool), 2 (schedule),
+    3 (hkstore) and 4 (mode), each with sensible body bytes.
+    Combined with the host-side per-subsystem round-trip tests
+    (tests/{schedule,hkstore,mode}_persistence_test.cpp), this proves
+    the full save→flash→load chain for the three new subsystems
+    end-to-end. Same Renode constraint as the fsw-16 save test:
+    1.16.1's Cortex-M `machine Reset` leaves the CPU in a debug-halt
+    state no monitor command unhalts, so a true warm-reboot round-trip
+    is host-side; on-flash bytes are read directly here."""
+    mon, uart = tc_hk_running
+
+    # 1. Schedule mutation: insert one activity and enable the schedule.
+    #    The activity is a tiny PUS-17 ping; release time well in the
+    #    future so it does not fire and re-bump the generation during
+    #    the test.
+    embedded_ping = build_pus17_are_you_alive_tc(
+        ack_flags=0,
+        source_id=0x0FE0,
+        seq_count=0xA0,
+    )
+    insert = build_pus11_insert_tc(
+        activities=[(1_000_000, embedded_ping)],
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0FE1,
+        seq_count=0xA1,
+    )
+    uart.send(insert)
+    _collect(uart, lambda ts: _completion_success(ts, insert[:4]), timeout=30.0)
+
+    sched_enable = build_pus11_enable_tc(
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0FE2,
+        seq_count=0xA2,
+    )
+    uart.send(sched_enable)
+    _collect(uart, lambda ts: _completion_success(ts, sched_enable[:4]), timeout=30.0)
+
+    # 2. Hkstore mutation: create a new structure and enable it. SID and
+    #    parameter IDs match the existing dynamic-housekeeping test so
+    #    the wire shape is familiar. interval_sec is large enough that
+    #    the structure won't fire and re-bump generation via _due (which
+    #    doesn't bump anyway, but kept large for cleanliness).
+    hk_sid = 0x0110
+    create = build_pus3_create_structure_tc(
+        sid=hk_sid,
+        param_ids=[DP_PARAM_FW_VERSION, DP_PARAM_FW_BUILD_ID],
+        interval_sec=1_000_000,
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0FE3,
+        seq_count=0xA3,
+    )
+    uart.send(create)
+    _collect(uart, lambda ts: _completion_success(ts, create[:4]), timeout=30.0)
+
+    hk_enable = build_pus3_enable_structure_tc(
+        sid=hk_sid,
+        ack_flags=ACK_ACCEPTANCE | ACK_COMPLETION,
+        source_id=0x0FE4,
+        seq_count=0xA4,
+    )
+    uart.send(hk_enable)
+    _collect(uart, lambda ts: _completion_success(ts, hk_enable[:4]), timeout=30.0)
+
+    # 3. Mode: the sample's boot transition already advanced the mode
+    #    generation to 1. No extra TC needed.
+
+    # 4. PUS-17 ping forces one more main-loop iteration after all the
+    #    above settles, guaranteeing the save tick runs with every
+    #    record's snapshot up to date.
+    ping_tc = build_pus17_are_you_alive_tc(
+        ack_flags=ACK_ACCEPTANCE,
+        source_id=0x0FE5,
+        seq_count=0xA5,
+    )
+    uart.send(ping_tc)
+    _collect(
+        uart,
+        lambda ts: next(
+            (t for t in ts if t.secondary.service_type == PUS_SERVICE_TEST), None
+        ),
+        timeout=30.0,
+    )
+
+    # 5. Read enough of the storage_partition to cover the full image —
+    #    the worst case for the fsw-17 default set (16-entry max
+    #    schedule + 8-entry max hkstore + datapool + mode) is ~1.3 KB;
+    #    a one-activity / one-structure image is well under 256 bytes.
+    storage_partition_base = 0x080C0000
+    read_len = 256
+    image = bytearray()
+    for off in range(read_len):
+        resp = mon.cmd(f"sysbus ReadByte {hex(storage_partition_base + off)}").strip()
+        image.append(int(resp, 16))
+    image = bytes(image)
+
+    # 6. Verify the image header. seq >= 2 because every record save
+    #    above coalesces into one or more save() calls — the schedule
+    #    insert/enable + hkstore create/enable + the trailing ping all
+    #    happen on distinct loop iterations.
+    assert image[:4] == b"MNV1", f"bad magic: {image[:4]!r}"
+    assert int.from_bytes(image[4:6], "big") == 1  # format_version
+    seq = int.from_bytes(image[6:10], "big")
+    assert seq >= 2, f"seq should be >= 2 after multiple mutations, got {seq}"
+    payload_len = int.from_bytes(image[10:12], "big")
+    assert 0 < payload_len <= 1536, f"unexpected payload_len {payload_len}"
+
+    # 7. CRC over header + payload (image stops at 12+payload_len+2 —
+    #    the rest is alignment padding).
+    crc_on_flash = int.from_bytes(image[12 + payload_len : 12 + payload_len + 2], "big")
+    crc_computed = crc16_ccitt_false(bytes(image[: 12 + payload_len]))
+    assert (
+        crc_on_flash == crc_computed
+    ), f"CRC mismatch: on-flash {crc_on_flash:#06x}, computed {crc_computed:#06x}"
+
+    # 8. Walk the payload and collect every record present.
+    record_datapool = 1
+    record_schedule = 2
+    record_hkstore = 3
+    record_mode = 4
+    payload = image[12 : 12 + payload_len]
+    records: dict[int, bytes] = {}
+    rec_pos = 0
+    while rec_pos < len(payload):
+        rec_type = payload[rec_pos]
+        rec_len = int.from_bytes(payload[rec_pos + 1 : rec_pos + 3], "big")
+        rec_body = bytes(payload[rec_pos + 3 : rec_pos + 3 + rec_len])
+        records[rec_type] = rec_body
+        rec_pos += 3 + rec_len
+
+    assert record_datapool in records, f"DATAPOOL record missing: types={list(records)}"
+    assert record_schedule in records, f"SCHEDULE record missing: types={list(records)}"
+    assert record_hkstore in records, f"HKSTORE record missing: types={list(records)}"
+    assert record_mode in records, f"MODE record missing: types={list(records)}"
+
+    # 9. Sanity-check each new record's body.
+    #    SCHEDULE: count(2 BE) + enabled(1) + entries. We inserted one
+    #    activity then enabled.
+    sched_body = records[record_schedule]
+    assert int.from_bytes(sched_body[0:2], "big") == 1
+    assert sched_body[2] == 1, f"schedule.enabled byte = {sched_body[2]}"
+
+    #    HKSTORE: count(2 BE) + per-structure {sid(2) + interval(4) +
+    #    enabled(1) + param_count(1) + ids(2*N)}. One structure, enabled.
+    hk_body = records[record_hkstore]
+    assert int.from_bytes(hk_body[0:2], "big") == 1
+    assert int.from_bytes(hk_body[2:4], "big") == hk_sid
+    assert hk_body[8] == 1, f"hkstore.enabled byte = {hk_body[8]}"
+    assert hk_body[9] == 2, f"hkstore.param_count = {hk_body[9]}"
+
+    #    MODE: one byte, the current mode ID. The boot transition lands
+    #    in NOMINAL = 1 in the sample's mode set.
+    mode_body = records[record_mode]
+    assert len(mode_body) == 1
+    assert mode_body[0] == 1, f"mode.current = {mode_body[0]} (expected NOMINAL=1)"

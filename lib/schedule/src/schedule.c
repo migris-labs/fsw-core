@@ -22,6 +22,7 @@ void migris_schedule_init(migris_schedule_t* sched) {
     }
     sched->count = 0U;
     sched->enabled = 0;
+    sched->generation = 0U;
 }
 
 void migris_schedule_reset(migris_schedule_t* sched) {
@@ -29,13 +30,19 @@ void migris_schedule_reset(migris_schedule_t* sched) {
         return;
     }
     sched->count = 0U;
+    sched->generation++;
 }
 
 void migris_schedule_set_enabled(migris_schedule_t* sched, int enabled) {
     if (sched == NULL) {
         return;
     }
-    sched->enabled = (enabled != 0) ? 1 : 0;
+    const int next = (enabled != 0) ? 1 : 0;
+    if (sched->enabled == next) {
+        return; /* No-op: don't bump generation on an unchanged value. */
+    }
+    sched->enabled = next;
+    sched->generation++;
 }
 
 int migris_schedule_is_enabled(const migris_schedule_t* sched) {
@@ -91,6 +98,7 @@ int migris_schedule_insert(migris_schedule_t* sched,
         slot->tc[i] = tc[i];
     }
     sched->count++;
+    sched->generation++;
     return MIGRIS_SCHEDULE_OK;
 }
 
@@ -104,6 +112,7 @@ int migris_schedule_delete(migris_schedule_t* sched, const uint8_t* request_id) 
     }
     sched->activities[idx] = sched->activities[sched->count - 1U];
     sched->count--;
+    sched->generation++;
     return MIGRIS_SCHEDULE_OK;
 }
 
@@ -155,5 +164,98 @@ int migris_schedule_pop_due(migris_schedule_t* sched,
     *out_len = due->tc_len;
     sched->activities[best] = sched->activities[sched->count - 1U];
     sched->count--;
+    sched->generation++;
     return 1;
+}
+
+uint32_t migris_schedule_generation(const migris_schedule_t* sched) {
+    return (sched == NULL) ? 0U : sched->generation;
+}
+
+/* --- Serialisation (slice fsw-17) -------------------------------- */
+
+/* Layout: count(2 BE) + enabled(1) + { release_time(4 BE), tc_len(2 BE),
+ * tc(tc_len bytes) } * count. Variable-length per entry so the image
+ * stays proportional to actual scheduled volume — a future
+ * MIGRIS_SCHEDULE_TC_MAX bump does not change the worst case in stored
+ * bytes for an under-filled schedule. The generation counter is
+ * RAM-only and not persisted; the on-flash record carries activities
+ * + enabled, nothing else. */
+int migris_schedule_serialize(const migris_schedule_t* sched, uint8_t* out, size_t out_cap) {
+    if (sched == NULL || out == NULL) {
+        return MIGRIS_SCHEDULE_ERR_BAD_ARG;
+    }
+    if (out_cap < 3U) {
+        return MIGRIS_SCHEDULE_ERR_BUF_TOO_SMALL;
+    }
+    out[0] = (uint8_t)(sched->count >> 8);
+    out[1] = (uint8_t)(sched->count & 0xFFU);
+    out[2] = (uint8_t)((sched->enabled != 0) ? 1U : 0U);
+    size_t off = 3U;
+    for (size_t i = 0U; i < sched->count; ++i) {
+        const migris_schedule_activity_t* a = &sched->activities[i];
+        const size_t need = 4U + 2U + a->tc_len;
+        if (out_cap - off < need) {
+            return MIGRIS_SCHEDULE_ERR_BUF_TOO_SMALL;
+        }
+        out[off] = (uint8_t)((a->release_time >> 24) & 0xFFU);
+        out[off + 1U] = (uint8_t)((a->release_time >> 16) & 0xFFU);
+        out[off + 2U] = (uint8_t)((a->release_time >> 8) & 0xFFU);
+        out[off + 3U] = (uint8_t)(a->release_time & 0xFFU);
+        out[off + 4U] = (uint8_t)((a->tc_len >> 8) & 0xFFU);
+        out[off + 5U] = (uint8_t)(a->tc_len & 0xFFU);
+        off += 6U;
+        for (size_t j = 0U; j < a->tc_len; ++j) {
+            out[off + j] = a->tc[j];
+        }
+        off += a->tc_len;
+    }
+    return (int)off;
+}
+
+int migris_schedule_deserialize(migris_schedule_t* sched, const uint8_t* in, size_t in_len) {
+    if (sched == NULL || in == NULL) {
+        return MIGRIS_SCHEDULE_ERR_BAD_ARG;
+    }
+    /* A failed decode leaves the schedule empty + disabled — the same
+     * post-init state, never a half-restored set. */
+    sched->count = 0U;
+    sched->enabled = 0;
+    if (in_len < 3U) {
+        return MIGRIS_SCHEDULE_ERR_TRUNCATED;
+    }
+    const uint16_t count = (uint16_t)(((uint16_t)in[0] << 8) | (uint16_t)in[1]);
+    const int enabled = (in[2] != 0U) ? 1 : 0;
+    if (count > MIGRIS_SCHEDULE_CAPACITY) {
+        return MIGRIS_SCHEDULE_ERR_FULL;
+    }
+    size_t off = 3U;
+    for (uint16_t i = 0U; i < count; ++i) {
+        if (off + 6U > in_len) {
+            sched->count = 0U;
+            return MIGRIS_SCHEDULE_ERR_TRUNCATED;
+        }
+        const uint32_t release_time = ((uint32_t)in[off] << 24) | ((uint32_t)in[off + 1U] << 16) |
+                                      ((uint32_t)in[off + 2U] << 8) | (uint32_t)in[off + 3U];
+        const uint16_t tc_len = (uint16_t)(((uint16_t)in[off + 4U] << 8) | (uint16_t)in[off + 5U]);
+        off += 6U;
+        if (tc_len > MIGRIS_SCHEDULE_TC_MAX || tc_len < MIGRIS_SCHEDULE_REQUEST_ID_SIZE) {
+            sched->count = 0U;
+            return MIGRIS_SCHEDULE_ERR_TC_TOO_LARGE;
+        }
+        if (off + tc_len > in_len) {
+            sched->count = 0U;
+            return MIGRIS_SCHEDULE_ERR_TRUNCATED;
+        }
+        migris_schedule_activity_t* slot = &sched->activities[i];
+        slot->release_time = release_time;
+        slot->tc_len = tc_len;
+        for (size_t j = 0U; j < tc_len; ++j) {
+            slot->tc[j] = in[off + j];
+        }
+        off += tc_len;
+        sched->count++;
+    }
+    sched->enabled = enabled;
+    return MIGRIS_SCHEDULE_OK;
 }

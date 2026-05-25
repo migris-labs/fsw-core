@@ -91,14 +91,14 @@ payload are silently ignored on read, so a structural rollback (a
 firmware version that did not know about a later record type) is
 non-fatal.
 
-### Defined record types (slice fsw-16)
+### Defined record types
 
-| `type` | name       | body | source |
-|--------|------------|------|--------|
-| `1`    | `DATAPOOL` | the serialised parameter datapool (see below) | `lib/datapool/` |
-
-Schedule, hkstore and mode persistence are deferred follow-on slices;
-each will claim a new record type in this table.
+| `type` | name       | body | source | added |
+|--------|------------|------|--------|-------|
+| `1`    | `DATAPOOL` | the serialised parameter datapool (see below) | `lib/datapool/` | fsw-16 |
+| `2`    | `SCHEDULE` | the serialised on-board schedule (see below) | `lib/schedule/` | fsw-17 |
+| `3`    | `HKSTORE`  | the serialised housekeeping-structure store (see below) | `lib/hkstore/` | fsw-17 |
+| `4`    | `MODE`     | the current operating-mode ID (one byte, see below) | `lib/mode/` | fsw-17 |
 
 ### `DATAPOOL` record body
 
@@ -124,6 +124,83 @@ in the running datapool AND the type matches; unknown ids and type
 mismatches are silently skipped, so a parameter set that has evolved
 across a firmware update degrades to "the changed parameters keep
 their defaults" rather than failing the whole restore.
+
+### `SCHEDULE` record body
+
+The schedule record body is the output of `migris_schedule_serialize`
+(`lib/schedule/src/schedule.c`):
+
+```
+offset  size   meaning
+------  -----  ---------------------------------------------------------
+0..1    2      count        — number of activities that follow (big-endian)
+2       1      enabled      — 0 or 1 (the operator-set state)
+                                    --- repeated `count` times ---
+0..3    4      release_time — absolute CUC coarse seconds (big-endian)
+4..5    2      tc_len       — telecommand length in bytes (big-endian)
+6..     tc_len tc           — the telecommand, verbatim
+```
+
+Variable-length per entry so the image stays proportional to actual
+scheduled volume — a future `MIGRIS_SCHEDULE_TC_MAX` change does not
+balloon the worst case for under-filled schedules. On `deserialize` a
+`tc_len` over `MIGRIS_SCHEDULE_TC_MAX` (firmware downgrade) or below
+the 4-byte request-id floor is rejected; the schedule is left empty
+on any error (stateless failure). The `generation` counter is
+**not** serialised — it is RAM-only, used by the application's
+"have I changed since the last save?" loop.
+
+### `HKSTORE` record body
+
+The hkstore record body is the output of `migris_hkstore_serialize`
+(`lib/hkstore/src/hkstore.c`):
+
+```
+offset  size   meaning
+------  -----  ---------------------------------------------------------
+0..1    2      count        — number of structures that follow (big-endian)
+                                    --- repeated `count` times ---
+0..1    2      sid          — Structure ID, >= 0x0100 (big-endian)
+2..5    4      interval_sec — reporting period, seconds (big-endian)
+6       1      enabled      — 0 or 1
+7       1      param_count  — 0..MIGRIS_HKSTORE_MAX_PARAMS
+8..     2·N    param_ids    — datapool parameter IDs, each 2 BE
+```
+
+Only the in-use slots are written, packed back-to-back. The
+`last_emit_sec` and `in_use` fields are **deliberately not
+serialised**. `in_use` is an array-slot artefact — on `deserialize`
+the restored structures compact into the low slots, so `in_use` is
+implicitly 1 for every persisted entry. `last_emit_sec` is excluded
+because the FSW clock resets to 0 on boot; a stale persisted value
+would make `(now - last_emit_sec) >= interval_sec` arithmetic
+underflow as `uint32_t` and the structure would fire on every tick
+until the clock caught up. Restored structures re-arm with
+`last_emit_sec = 0`, matching post-`create` behaviour. The SID floor
+(`MIGRIS_HKSTORE_SID_MIN = 0x0100`) and the duplicate-SID guard
+mirror `migris_hkstore_create` and are enforced on `deserialize`.
+
+### `MODE` record body
+
+The mode record body is the output of `migris_mode_serialize`
+(`lib/mode/src/mode.c`):
+
+```
+offset  size   meaning
+------  -----  ---------------------------------------------------------
+0       1      current      — the active mode ID
+```
+
+One byte. The mode set, the allowed-target bitmasks and the optional
+event sink are code-defined at every `migris_mode_init` and are not
+persisted — a stale on-flash table would outlive a firmware change to
+the rules. On `deserialize_current` the restored ID is validated
+against the declared mode set; if it is unknown (firmware shipped a
+new mode table and dropped the old mode), the init-time current mode
+is silently kept and the call still returns `MIGRIS_MODE_OK`
+(rollback is non-fatal — the spacecraft must boot). The deserialise
+does **not** emit a `MODE_CHANGED` event (a boot restore is not a
+runtime transition) and does **not** bump the generation counter.
 
 ## Versioning of this document
 
