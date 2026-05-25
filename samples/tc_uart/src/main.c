@@ -659,14 +659,22 @@ int main(void) {
      * `nv_autosave_tick`, puts the new bytes only for records that
      * advanced, and issues at most one `migris_nvstore_save` per
      * iteration — back-to-back mutations coalesce into one flash
-     * write. Initialised to the post-restore generation (0 in both
-     * cases — deserialise is a restore, not a mutation, so it does
-     * not bump). */
-    uint32_t last_saved_gen_dp = migris_datapool_generation(&datapool);
-    uint32_t last_saved_gen_sched = migris_schedule_generation(&schedule);
-    uint32_t last_saved_gen_hk = migris_hkstore_generation(&hkstore);
+     * write.
+     *
+     * Initialised to **0** (not the post-restore generation): every
+     * subsystem's `init` / `deserialize` leaves `generation == 0`,
+     * and any runtime mutation that bumps it past 0 is a change we
+     * want persisted. This matters for the boot-time mode transition
+     * above — the BOOT→NOMINAL request bumps mode.generation to 1
+     * *before* we get here, and we want that initial NOMINAL to land
+     * on flash (otherwise a first-boot crash would resurrect BOOT on
+     * the next start). Initialising the snapshot to the post-boot
+     * generation would miss that save. */
+    uint32_t last_saved_gen_dp = 0U;
+    uint32_t last_saved_gen_sched = 0U;
+    uint32_t last_saved_gen_hk = 0U;
 #ifdef CONFIG_FSW_MODE_DEMO
-    uint32_t last_saved_gen_mode = migris_mode_generation(&mode_mgr);
+    uint32_t last_saved_gen_mode = 0U;
 #endif
 
     for (;;) {
